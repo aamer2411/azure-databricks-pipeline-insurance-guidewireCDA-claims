@@ -1,0 +1,1121 @@
+{
+    "name": "pl_c_source_to_raw",
+    "properties": {
+        "description": "This pipeline copies the data (parquet files) from Client owned data store to our ADLS container",
+        "activities": [
+            {
+                "name": "Step Start",
+                "description": "This stored procedure prepares step tracking tables:\n\n1. Gets STEP_STS_CD and CYC_SK from STEP_CTRL_TBL for the given STEP_SK — only proceeds if STEP_STS_CD = 'C' (Ready state)\n2. Gets CYC_CUR_RUN_SK from CYC_CTRL_TBL using CYC_SK (to link the step run to the current cycle run)\n3. Adds new row to STEP_RUN_TBL (with STEP_STS_CD = 'I' & new STEP_RUN_SK for the newly created row)\n4. Updates STEP_CTRL_TBL (sets step status STEP_STS_CD = 'I' & updates STEP_CUR_RUN_SK with the value of new STEP_RUN_SK from above point)\n5. Resets JOB_CTRL_TBL (all jobs back to JOB_STS_CD = 'C') — only if FORCE_IND = 'N' ###Need to check this part as downstream activities should already have made this C due to which the status becomes C\n\nParameters:\nSTEP_SK = Identifies which step to start (e.g., 10110)\nFORCE_IND = 'N' (default) resets all jobs for a fresh run; 'Y' preserves already-completed jobs to allow mid-run restart",
+                "type": "SqlServerStoredProcedure",
+                "dependsOn": [],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "storedProcedureName": {
+                        "value": "@{pipeline().parameters.ASQL_SCHEMA}.[PROC_UPDATE_STEP_START]",
+                        "type": "Expression"
+                    },
+                    "storedProcedureParameters": {
+                        "FORCE_IND": {
+                            "value": {
+                                "value": "@pipeline().parameters.FORCE_IND",
+                                "type": "Expression"
+                            },
+                            "type": "String"
+                        },
+                        "STEP_SK": {
+                            "value": {
+                                "value": "@pipeline().parameters.STEP_SK_RAW",
+                                "type": "Expression"
+                            },
+                            "type": "Int32"
+                        }
+                    }
+                },
+                "linkedServiceName": {
+                    "referenceName": "ls_icd_asql_abc_metadata",
+                    "type": "LinkedServiceReference"
+                }
+            },
+            {
+                "name": "Prepare Job List for This Cycle",
+                "description": "This stored procedure inserts missing jobs and updates existing jobs in JOB_CTRL_TBL for both RAW and Replica (RPL) layers:\n\n1. Inserts missing RAW jobs into JOB_CTRL_TBL (JOB_TYP_CD = 'RAW', STEP_SK = STEP_SK_RAW) — one job row per table found in TABLE_LOAD_METADATA for the given XCENTER, only if that table doesn't already exist as a job for that step (NOT EXISTS check)\n2. Inserts missing RPL jobs into JOB_CTRL_TBL (JOB_TYP_CD = 'RPL', STEP_SK = STEP_SK_PRC) — same tables, second job row per table for the Replica layer (NOT EXISTS check)\n3. Updates all RAW jobs — sets CUR_CYC_VALID = 'Y' if table has new data this cycle (LOAD_STATUS = 'I'), else 'N'; resets JOB_STS_CD = 'C'\n4. Updates all RPL jobs — same CUR_CYC_VALID and JOB_STS_CD reset as above\n\nEach source table gets 2 job rows — one RAW (Stage → Raw layer as in point 1) and one RPL (Raw → Replica layer as in point 2) — so each layer can be tracked and controlled independently.\n\nAll inserts and updates are made only in JOB_CTRL_TBL. TABLE_LOAD_METADATA is used as a read-only source to determine which tables exist and their load status for the given XCENTER.\n\nCUR_CYC_VALID flag is used by the downstream ForEach loop to decide which jobs to process ('Y') and which to skip ('N') this cycle.\n\nParameters:\nSTEP_SK_RAW = Step SK for the RAW layer step (e.g., 10110)\nSTEP_SK_PRC = Step SK for the Replica (RPL) layer step (e.g., 10120)\nXCENTER = Exchange center filter (e.g., 'CC') to scope which tables to process",
+                "type": "SqlServerStoredProcedure",
+                "dependsOn": [
+                    {
+                        "activity": "Step Start",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "storedProcedureName": {
+                        "value": "@{pipeline().parameters.ASQL_SCHEMA}.[INSERT_UPDATE_JOB_CTRL_TBL]",
+                        "type": "Expression"
+                    },
+                    "storedProcedureParameters": {
+                        "STEP_SK_PRC": {
+                            "value": {
+                                "value": "@pipeline().parameters.STEP_SK_REPLICA",
+                                "type": "Expression"
+                            },
+                            "type": "Int32"
+                        },
+                        "STEP_SK_RAW": {
+                            "value": {
+                                "value": "@pipeline().parameters.STEP_SK_RAW",
+                                "type": "Expression"
+                            },
+                            "type": "Int32"
+                        },
+                        "XCENTER": {
+                            "value": {
+                                "value": "@pipeline().parameters.XCENTER",
+                                "type": "Expression"
+                            },
+                            "type": "String"
+                        }
+                    }
+                },
+                "linkedServiceName": {
+                    "referenceName": "ls_icd_asql_abc_metadata",
+                    "type": "LinkedServiceReference"
+                }
+            },
+            {
+                "name": "Populate Table List to Copy Files from Source to ADLS",
+                "description": "This stored procedure prepares TABLES_TO_LOAD as a fresh working table for the Src → Raw notebook each cycle run:\n\n1. Deletes all existing entries from TABLES_TO_LOAD for the given STEP_SK — ensures a clean slate before re-populating (idempotent, safe to re-run)\n\n2. Inserts one row per table into TABLES_TO_LOAD by joining JOB_CTRL_TBL and CDA_FILE_LOADS:\n    2.1 From JOB_CTRL_TBL — only picks jobs that have new data this cycle (CUR_CYC_VALID = 'Y'), are ready (JOB_STS_CD = 'C'), and are active (ACTI_IND = 'Y') for the given STEP_SK\n    2.2 From CDA_FILE_LOADS — only picks pending/unprocessed files (IS_LOADED = 0) for the given XCENTER; computes START_TIMESTAMP (MIN) and END_TIMESTAMP (MAX) of those files\n\n3. The timestamp range tells the downstream Src → Raw notebook which parquet folders to copy from Stage to Raw layer\n\nTABLES_TO_LOAD is a temporary working table — fully rebuilt every cycle (DELETE then INSERT). It is not a permanent control table like JOB_CTRL_TBL.\n\nParameters:\nSTEP_SK = Step SK for the RAW layer step to process\nXCENTER = Exchange center filter (e.g., 'CC') to scope which tables and files to process\n",
+                "type": "SqlServerStoredProcedure",
+                "dependsOn": [
+                    {
+                        "activity": "Prepare Job List for This Cycle",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "storedProcedureName": {
+                        "value": "@{pipeline().parameters.ASQL_SCHEMA}.[PROC_WRAPPER_SRC_RAW]",
+                        "type": "Expression"
+                    },
+                    "storedProcedureParameters": {
+                        "STEP_SK": {
+                            "value": {
+                                "value": "@pipeline().parameters.STEP_SK_RAW",
+                                "type": "Expression"
+                            },
+                            "type": "Int32"
+                        },
+                        "XCENTER": {
+                            "value": {
+                                "value": "@pipeline().parameters.XCENTER",
+                                "type": "Expression"
+                            },
+                            "type": "String"
+                        }
+                    }
+                },
+                "linkedServiceName": {
+                    "referenceName": "ls_icd_asql_abc_metadata",
+                    "type": "LinkedServiceReference"
+                }
+            },
+            {
+                "name": "Check Run Status and Set Restart Flags",
+                "description": "Reads the current cycle and step run status from Azure SQL and returns two flags to ADF - Truncate and Force_Truncate — that control whether the Source to ADLS file copy runs fresh or resumes from a previous failed attempt.",
+                "type": "DatabricksNotebook",
+                "dependsOn": [
+                    {
+                        "activity": "Populate Table List to Copy Files from Source to ADLS",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "notebookPath": "/insurance_claims_domain/05 Check Run Status and Set Restart Flags",
+                    "baseParameters": {
+                        "ASQL_SCHEMA": {
+                            "value": "@pipeline().parameters.ASQL_SCHEMA",
+                            "type": "Expression"
+                        },
+                        "STEP_SK_RAW": {
+                            "value": "@pipeline().parameters.STEP_SK_RAW",
+                            "type": "Expression"
+                        },
+                        "CYC_RUN_SK": {
+                            "value": "@pipeline().parameters.CYC_RUN_SK",
+                            "type": "Expression"
+                        }
+                    }
+                },
+                "linkedServiceName": {
+                    "referenceName": "ls_icd_adb",
+                    "type": "LinkedServiceReference"
+                }
+            },
+            {
+                "name": "Copy Parquet Files from Source to ADLS or not",
+                "description": "Checks whether raw files need to be copied this run. If Truncate=Y, proceeds to copy parquet files from source to ADLS. If Truncate=N, files already exist in ADLS from a previous failed attempt — skips the copy and resumes from where it left off.",
+                "type": "IfCondition",
+                "dependsOn": [
+                    {
+                        "activity": "Check Run Status and Set Restart Flags",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "userProperties": [],
+                "typeProperties": {
+                    "expression": {
+                        "value": "@if(equals(activity('Check Run Status and Set Restart Flags').output['runOutput']['Truncate'],'Y'), true, false)",
+                        "type": "Expression"
+                    },
+                    "ifTrueActivities": [
+                        {
+                            "name": "Truncate Previous Cycle Raw Table Load",
+                            "description": "When Truncate = 'Y' (fresh run or forced restart), deletes all existing rows for the current XCENTER from RAW_TABLE_LOAD in Azure SQL to ensure a clean slate before the fresh raw data load begins.",
+                            "type": "Script",
+                            "dependsOn": [],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 0,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_asql_abc_metadata",
+                                "type": "LinkedServiceReference"
+                            },
+                            "typeProperties": {
+                                "scripts": [
+                                    {
+                                        "type": "Query",
+                                        "text": {
+                                            "value": "DELETE from @{pipeline().parameters.ASQL_SCHEMA}.RAW_TABLE_LOAD where XCENTER='@{pipeline().parameters.XCENTER}'",
+                                            "type": "Expression"
+                                        }
+                                    }
+                                ],
+                                "scriptBlockExecutionTimeout": "02:00:00"
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                "name": "Get Tables To Load",
+                "description": "Queries TABLES_TO_LOAD in Azure SQL to fetch all tables configured for the current XCENTER, returning TABLE_NAME, STEP_SK, JOB_SK, and timestamp details to guide the downstream raw data load.",
+                "type": "Lookup",
+                "dependsOn": [
+                    {
+                        "activity": "Copy Parquet Files from Source to ADLS or not",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "source": {
+                        "type": "AzureSqlSource",
+                        "sqlReaderQuery": {
+                            "value": "SELECT TABLE_NAME, START_TIMESTAMP, END_TIMESTAMP, STEP_SK, JOB_SK FROM @{pipeline().parameters.ASQL_SCHEMA}.TABLES_TO_LOAD WHERE XCENTER='@{pipeline().parameters.XCENTER}'",
+                            "type": "Expression"
+                        },
+                        "queryTimeout": "02:00:00",
+                        "partitionOption": "None"
+                    },
+                    "dataset": {
+                        "referenceName": "ds_asql_abc",
+                        "type": "DatasetReference"
+                    },
+                    "firstRowOnly": false
+                }
+            },
+            {
+                "name": "Process Each Table from Source to ADLS",
+                "description": "Iterates over the table list built by Get Tables to Load, processing up to 40 tables in parallel. For each table, checks the run state and copies parquet files from source to ADLS if required.",
+                "type": "ForEach",
+                "dependsOn": [
+                    {
+                        "activity": "Get Tables To Load",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "userProperties": [],
+                "typeProperties": {
+                    "items": {
+                        "value": "@activity('Get Tables to Load').output.value",
+                        "type": "Expression"
+                    },
+                    "batchCount": 40,
+                    "activities": [
+                        {
+                            "name": "Job Start",
+                            "description": "This stored procedure marks a job as started by updating job tracking tables:\n\n1. Gets STEP_CUR_RUN_SK from STEP_CTRL_TBL using STEP_SK — to link the job run to the current step run (no need to pass it as a parameter)\n2. Generates new JOB_RUN_SK (MAX + 1) from JOB_RUN_TBL\n3. Inserts new row into JOB_RUN_TBL with JOB_STS_CD = 'I' (In-Progress) and start time; all count columns (RCRD_READ_CNT, RCRD_LD_CNT, RCRD_INS_CNT, RCRD_UPD_CNT, RCRD_DEL_CNT, DATA_READ, DATA_WRITTEN) are NULL at this point — populated later by PROC_UPDATE_JOB_END\n4. Updates JOB_CTRL_TBL — sets JOB_STS_CD = 'I' for the given JOB_SK\n5. Returns new JOB_RUN_SK for downstream ADF activities to use\n\nParameters:\nJOB_SK = Identifies which job to start\nSTEP_SK = Parent step SK — used to fetch current STEP_RUN_SK from STEP_CTRL_TBL",
+                            "type": "SqlServerStoredProcedure",
+                            "dependsOn": [],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 0,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "storedProcedureName": {
+                                    "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_UPDATE_JOB_START",
+                                    "type": "Expression"
+                                },
+                                "storedProcedureParameters": {
+                                    "JOB_SK": {
+                                        "value": {
+                                            "value": "@item().JOB_SK",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int64"
+                                    },
+                                    "STEP_SK": {
+                                        "value": {
+                                            "value": "@item().STEP_SK",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int32"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_asql_abc_metadata",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Copy Parquet Files from Source to ADLS Raw",
+                            "description": "For each table, reads pending files from CDA_FILE_LOADS, copies parquet folders from source to ADLS raw in parallel, runs a schema datatype check against the replica, and returns job status to ADF.",
+                            "type": "DatabricksNotebook",
+                            "dependsOn": [
+                                {
+                                    "activity": "Job Start",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "notebookPath": "/insurance_claims_domain/06 Copy Parquet Files from Source to ADLS Raw",
+                                "baseParameters": {
+                                    "TABLE_NAME": {
+                                        "value": "@item().TABLE_NAME",
+                                        "type": "Expression"
+                                    },
+                                    "START_TIMESTAMP": {
+                                        "value": "@string(item().START_TIMESTAMP)",
+                                        "type": "Expression"
+                                    },
+                                    "END_TIMESTAMP": {
+                                        "value": "@string(item().END_TIMESTAMP)",
+                                        "type": "Expression"
+                                    },
+                                    "TYPE_DATA": {
+                                        "value": "@pipeline().parameters.TYPE_DATA",
+                                        "type": "Expression"
+                                    },
+                                    "XCENTER": {
+                                        "value": "@pipeline().parameters.XCENTER",
+                                        "type": "Expression"
+                                    },
+                                    "ASQL_SCHEMA": {
+                                        "value": "@pipeline().parameters.ASQL_SCHEMA",
+                                        "type": "Expression"
+                                    },
+                                    "ADLS_CLIENT_DATA_PATH": {
+                                        "value": "@pipeline().parameters.ADLS_CLIENT_DATA_PATH",
+                                        "type": "Expression"
+                                    },
+                                    "ADLS_RAW_PATH": {
+                                        "value": "@pipeline().parameters.ADLS_RAW_PATH",
+                                        "type": "Expression"
+                                    },
+                                    "CYC_RUN_SK": {
+                                        "value": "@pipeline().parameters.CYC_RUN_SK",
+                                        "type": "Expression"
+                                    },
+                                    "Truncate": {
+                                        "value": "@activity('Check Run Status and Set Restart Flags').output['runOutput']['Truncate']",
+                                        "type": "Expression"
+                                    },
+                                    "Force_Truncate": {
+                                        "value": "@pipeline().parameters.FORCE_TRUNCATE",
+                                        "type": "Expression"
+                                    },
+                                    "Processed_DB": {
+                                        "value": "@pipeline().parameters.Processed_DB",
+                                        "type": "Expression"
+                                    },
+                                    "Processed_Schema": {
+                                        "value": "@pipeline().parameters.Processed_Schema",
+                                        "type": "Expression"
+                                    },
+                                    "ADLS_REPLICA_PATH": {
+                                        "value": "@pipeline().parameters.ADLS_REPLICA_PATH",
+                                        "type": "Expression"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_adb",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Mark Source Files Loaded and Update Table Load Status",
+                            "description": "This stored procedure marks a table's Src → Raw load as complete by updating two metadata tables:\n\n1. Updates CDA_FILE_LOADS — sets IS_LOADED = 1 (loaded) for all pending files (IS_LOADED = 0) for the given TABLE_NAME and XCENTER where GW_TIMESTAMP <= END_TIMESTAMP; files beyond END_TIMESTAMP are left untouched for the next cycle\n2. Updates TABLE_LOAD_METADATA — sets LOAD_STATUS = 'C' (Complete) for the given TABLE_NAME and XCENTER, signalling that the Src → Raw copy is done and the table is ready for the downstream Raw → Replica step\n\nThis proc is called after the Src → Raw notebook successfully copies a table's parquet files to the Raw layer.\n\nParameters:\nCYC_RUN_SK = Current cycle run SK for reference\nEND_TIMESTAMP = Upper bound timestamp — only files up to this value are marked as loaded\nTABLE_NAME = Table being marked as complete (e.g., 'cc_policy')\nXCENTER = Exchange center filter (e.g., 'CC')",
+                            "type": "SqlServerStoredProcedure",
+                            "dependsOn": [
+                                {
+                                    "activity": "Copy Parquet Files from Source to ADLS Raw",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "storedProcedureName": {
+                                    "value": "@{pipeline().parameters.ASQL_SCHEMA}.UPDATE_METADATA_LOAD",
+                                    "type": "Expression"
+                                },
+                                "storedProcedureParameters": {
+                                    "CYC_RUN_SK": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.CYC_RUN_SK",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int32"
+                                    },
+                                    "END_TIMESTAMP": {
+                                        "value": {
+                                            "value": "@activity('Copy Parquet Files from Source to ADLS Raw').output.runOutput.END_TIMESTAMP",
+                                            "type": "Expression"
+                                        },
+                                        "type": "String"
+                                    },
+                                    "TABLE_NAME": {
+                                        "value": {
+                                            "value": "@item().TABLE_NAME",
+                                            "type": "Expression"
+                                        },
+                                        "type": "String"
+                                    },
+                                    "XCENTER": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.XCENTER",
+                                            "type": "Expression"
+                                        },
+                                        "type": "String"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_asql_abc_metadata",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Job End Fail",
+                            "description": "On failure of the Source to ADLS load for a table, this activity updates JOB_RUN_TBL with the final job status, load statistics, and error details, and reflects the same status on JOB_CTRL_TBL to mark the job as failed for the current cycle.",
+                            "type": "SqlServerStoredProcedure",
+                            "dependsOn": [
+                                {
+                                    "activity": "Copy Parquet Files from Source to ADLS Raw",
+                                    "dependencyConditions": [
+                                        "Failed"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "storedProcedureName": {
+                                    "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_UPDATE_JOB_END",
+                                    "type": "Expression"
+                                },
+                                "storedProcedureParameters": {
+                                    "DATA_READ": {
+                                        "value": null,
+                                        "type": "String"
+                                    },
+                                    "DATA_WRITTEN": {
+                                        "value": null,
+                                        "type": "String"
+                                    },
+                                    "ERR_MSG": {
+                                        "value": {
+                                            "value": "@concat(activity('Copy Parquet Files from Source to ADLS Raw').output.runPageUrl, ' | ', activity('Copy Parquet Files from Source to ADLS Raw').output.runError)",
+                                            "type": "Expression"
+                                        },
+                                        "type": "String"
+                                    },
+                                    "JOB_SK": {
+                                        "value": {
+                                            "value": "@item().JOB_SK",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int64"
+                                    },
+                                    "RCRD_DEL": {
+                                        "value": "0",
+                                        "type": "Int32"
+                                    },
+                                    "RCRD_INS": {
+                                        "value": "0",
+                                        "type": "Int32"
+                                    },
+                                    "RCRD_UPD": {
+                                        "value": "0",
+                                        "type": "Int32"
+                                    },
+                                    "ROWS_LOADED": {
+                                        "value": "0",
+                                        "type": "Int64"
+                                    },
+                                    "ROWS_READ": {
+                                        "value": "0",
+                                        "type": "Int64"
+                                    },
+                                    "STATUS": {
+                                        "value": "F",
+                                        "type": "String"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_asql_abc_metadata",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Job Failure Email",
+                            "type": "WebActivity",
+                            "dependsOn": [
+                                {
+                                    "activity": "Job End Fail",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "method": "POST",
+                                "url": {
+                                    "value": "@pipeline().globalParameters.LogicAppURL",
+                                    "type": "Expression"
+                                },
+                                "body": {
+                                    "value": "{\n\"message\" : \"Hi Team,\n<p>Step Name:@{pipeline().Pipeline} </p>\n <p>Run ID:@{pipeline().RunId} </p>\n <p> Status: Failed</p>\",\n\"dataFactoryName\" : \"@{pipeline().DataFactory}\", \n\"pipelineName\" : \"@{pipeline().Pipeline}\"\n}",
+                                    "type": "Expression"
+                                }
+                            }
+                        },
+                        {
+                            "name": "Job End",
+                            "description": "This stored procedure marks job completion and updates job tracking tables:\n\n1. Updates JOB_RUN_TBL for the given JOB_SK only if the job is currently in progress (JOB_STS_CD = 'I')\n2. Sets the final job status to @STATUS (S for success or F for failure)\n3. Stores the job end time and final load statistics in JOB_RUN_TBL\n4. Updates JOB_CTRL_TBL with the same final status so the job is marked complete for the current cycle\n\nReturns no output value.\n\nParameters:\nJOB_SK = Identifies which job is being completed\nSTATUS = Final job status (S or F)",
+                            "type": "SqlServerStoredProcedure",
+                            "dependsOn": [
+                                {
+                                    "activity": "Mark Source Files Loaded and Update Table Load Status",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "storedProcedureName": {
+                                    "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_UPDATE_JOB_END",
+                                    "type": "Expression"
+                                },
+                                "storedProcedureParameters": {
+                                    "DATA_READ": {
+                                        "value": {
+                                            "value": "@activity('Copy Parquet Files from Source to ADLS Raw').output['runOutput']['DATA_READ']",
+                                            "type": "Expression"
+                                        },
+                                        "type": "String"
+                                    },
+                                    "DATA_WRITTEN": {
+                                        "value": {
+                                            "value": "@activity('Copy Parquet Files from Source to ADLS Raw').output['runOutput']['DATA_WRITTEN']",
+                                            "type": "Expression"
+                                        },
+                                        "type": "String"
+                                    },
+                                    "ERR_MSG": {
+                                        "value": null,
+                                        "type": "String"
+                                    },
+                                    "JOB_SK": {
+                                        "value": {
+                                            "value": "@item().JOB_SK",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int64"
+                                    },
+                                    "RCRD_DEL": {
+                                        "value": "0",
+                                        "type": "Int32"
+                                    },
+                                    "RCRD_INS": {
+                                        "value": "0",
+                                        "type": "Int32"
+                                    },
+                                    "RCRD_UPD": {
+                                        "value": "0",
+                                        "type": "Int32"
+                                    },
+                                    "ROWS_LOADED": {
+                                        "value": "0",
+                                        "type": "Int64"
+                                    },
+                                    "ROWS_READ": {
+                                        "value": "0",
+                                        "type": "Int64"
+                                    },
+                                    "STATUS": {
+                                        "value": {
+                                            "value": "@activity('Copy Parquet Files from Source to ADLS Raw').output['runOutput']['STATUS']",
+                                            "type": "Expression"
+                                        },
+                                        "type": "String"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_asql_abc_metadata",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Lookup On Job Status",
+                            "description": "Retrieves the final job status from JOB_CTRL_TBL for the current table to determine whether to mark the corresponding CDA_FILE_LOADS records as loaded in the next activity.",
+                            "type": "Lookup",
+                            "dependsOn": [
+                                {
+                                    "activity": "Job End",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "source": {
+                                    "type": "AzureSqlSource",
+                                    "sqlReaderQuery": {
+                                        "value": "SELECT JOB_STS_CD FROM @{pipeline().parameters.ASQL_SCHEMA}.JOB_CTRL_TBL where JOB_SK = @{item().JOB_SK}",
+                                        "type": "Expression"
+                                    },
+                                    "queryTimeout": "02:00:00",
+                                    "partitionOption": "None"
+                                },
+                                "dataset": {
+                                    "referenceName": "ds_asql_abc",
+                                    "type": "DatasetReference"
+                                }
+                            }
+                        },
+                        {
+                            "name": "If JOB_STS_CD Is F",
+                            "type": "IfCondition",
+                            "dependsOn": [
+                                {
+                                    "activity": "Lookup On Job Status",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "userProperties": [],
+                            "typeProperties": {
+                                "expression": {
+                                    "value": "@if(equals(activity('Lookup On Job Status').output.firstRow['JOB_STS_CD'], 'F'), true, false)",
+                                    "type": "Expression"
+                                },
+                                "ifTrueActivities": [
+                                    {
+                                        "name": "Job Failure Email Based On Job Status",
+                                        "type": "WebActivity",
+                                        "dependsOn": [],
+                                        "policy": {
+                                            "timeout": "0.12:00:00",
+                                            "retry": 0,
+                                            "retryIntervalInSeconds": 30,
+                                            "secureOutput": false,
+                                            "secureInput": false
+                                        },
+                                        "userProperties": [],
+                                        "typeProperties": {
+                                            "method": "POST",
+                                            "url": {
+                                                "value": "@pipeline().globalParameters.LogicAppURL",
+                                                "type": "Expression"
+                                            },
+                                            "body": {
+                                                "value": "{\n\"message\" : \"Hi Team,\n<p>Step Name:@{pipeline().Pipeline} </p>\n <p>Run ID:@{pipeline().RunId} </p>\n <p> Status: Failed</p>\",\n\"dataFactoryName\" : \"@{pipeline().DataFactory}\", \n\"pipelineName\" : \"@{pipeline().Pipeline}\"\n}",
+                                                "type": "Expression"
+                                            }
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                "name": "Lookup On Job Status To Determine Step Status",
+                "description": "Counts the number of failed jobs in JOB_CTRL_TBL for the Source to ADLS step to determine whether the overall step succeeded or had failures before closing the step.",
+                "type": "Lookup",
+                "dependsOn": [
+                    {
+                        "activity": "Process Each Table from Source to ADLS",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 2,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "source": {
+                        "type": "AzureSqlSource",
+                        "sqlReaderQuery": {
+                            "value": "SELECT COUNT(JOB_STS_CD) AS CNT FROM @{pipeline().parameters.ASQL_SCHEMA}.JOB_CTRL_TBL WHERE STEP_SK =@{pipeline().parameters.STEP_SK_RAW} AND JOB_TYP_CD='RAW' AND JOB_STS_CD='F'",
+                            "type": "Expression"
+                        },
+                        "queryTimeout": "02:00:00",
+                        "partitionOption": "None"
+                    },
+                    "dataset": {
+                        "referenceName": "ds_asql_abc",
+                        "type": "DatasetReference"
+                    }
+                }
+            },
+            {
+                "name": "Step End Fail",
+                "description": "This stored procedure updates step completion and tracking tables:\n1. Gets STEP_CUR_RUN_SK from STEP_CTRL_TBL using STEP_SK — to identify the current step run\n2. Updates STEP_RUN_TBL for that STEP_RUN_SK with the final step status (S for success or F for failure) and end time\n3. Updates STEP_CTRL_TBL with the same final status so the step is marked complete for the current cycle\n\nReturns no output value.\n\nParameters:\nSTEP_SK = Identifies which step is being completed\nSTATUS = Final step status (S or F)",
+                "type": "SqlServerStoredProcedure",
+                "dependsOn": [
+                    {
+                        "activity": "Process Each Table from Source to ADLS",
+                        "dependencyConditions": [
+                            "Failed"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 2,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "storedProcedureName": {
+                        "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_UPDATE_STEP_END",
+                        "type": "Expression"
+                    },
+                    "storedProcedureParameters": {
+                        "STATUS": {
+                            "value": "F",
+                            "type": "String"
+                        },
+                        "STEP_SK": {
+                            "value": {
+                                "value": "@pipeline().parameters.STEP_SK_RAW",
+                                "type": "Expression"
+                            },
+                            "type": "Int32"
+                        }
+                    }
+                },
+                "linkedServiceName": {
+                    "referenceName": "ls_icd_asql_abc_metadata",
+                    "type": "LinkedServiceReference"
+                }
+            },
+            {
+                "name": "Cycle End Fail",
+                "description": "This stored procedure marks cycle completion and resets tracking tables for the next run:\n\n1. Determines the final cycle status as F if any child step failed (STEP_STS_CD = 'F'), otherwise S\n2. Gets the current CYC_CUR_RUN_SK from CYC_CTRL_TBL for the given CYC_SK\n3. Updates CYC_RUN_TBL with the final cycle status and end time\n4. Updates CYC_CTRL_TBL to set CYC_STS_CD = 'C', marking the cycle complete and ready for the next run\n5. Resets STEP_CTRL_TBL back to STEP_STS_CD = 'C'\n6. Resets JOB_CTRL_TBL back to JOB_STS_CD = 'C' for all jobs under the cycle\n7. Resets VALIDATION_CTRL_TBL back to STATUS = 'C' for all matching XCENTER values",
+                "type": "SqlServerStoredProcedure",
+                "dependsOn": [
+                    {
+                        "activity": "Process Each Table from Source to ADLS",
+                        "dependencyConditions": [
+                            "Failed"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 2,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "storedProcedureName": {
+                        "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_UPDATE_CYC_END",
+                        "type": "Expression"
+                    },
+                    "storedProcedureParameters": {
+                        "CYC_SK": {
+                            "value": {
+                                "value": "@pipeline().parameters.CYC_SK",
+                                "type": "Expression"
+                            },
+                            "type": "Int32"
+                        }
+                    }
+                },
+                "linkedServiceName": {
+                    "referenceName": "ls_icd_asql_abc_metadata",
+                    "type": "LinkedServiceReference"
+                }
+            },
+            {
+                "name": "If All Jobs Are Successful",
+                "type": "IfCondition",
+                "dependsOn": [
+                    {
+                        "activity": "Lookup On Job Status To Determine Step Status",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "userProperties": [],
+                "typeProperties": {
+                    "expression": {
+                        "value": "@if(equals(activity('Lookup On Job Status To Determine Step Status').output.firstRow['CNT'], 0), true, false)",
+                        "type": "Expression"
+                    },
+                    "ifFalseActivities": [
+                        {
+                            "name": "Step End Failure",
+                            "description": "Updates STEP_RUN_TBL with the final status and end time, and reflects the same status on STEP_CTRL_TBL to mark the step as complete for the current cycle.",
+                            "type": "SqlServerStoredProcedure",
+                            "dependsOn": [],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "storedProcedureName": {
+                                    "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_UPDATE_STEP_END",
+                                    "type": "Expression"
+                                },
+                                "storedProcedureParameters": {
+                                    "STATUS": {
+                                        "value": "F",
+                                        "type": "String"
+                                    },
+                                    "STEP_SK": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.STEP_SK_RAW",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int32"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_asql_abc_metadata",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Cycle End Failure",
+                            "description": "Determines the final cycle status based on child step outcomes, closes the cycle run record in CYC_RUN_TBL, and resets JOB_CTRL_TBL, STEP_CTRL_TBL, CYC_CTRL_TBL and VALIDATION_CTRL_TBL back to idle for the next cycle run.",
+                            "type": "SqlServerStoredProcedure",
+                            "dependsOn": [
+                                {
+                                    "activity": "Step End Failure",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "storedProcedureName": {
+                                    "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_UPDATE_CYC_END",
+                                    "type": "Expression"
+                                },
+                                "storedProcedureParameters": {
+                                    "CYC_SK": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.CYC_SK",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int32"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_asql_abc_metadata",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Source To Raw Step Fail",
+                            "type": "Fail",
+                            "dependsOn": [
+                                {
+                                    "activity": "Cycle End Failure",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "userProperties": [],
+                            "typeProperties": {
+                                "message": "Source To Raw Step Failed",
+                                "errorCode": "F"
+                            }
+                        }
+                    ],
+                    "ifTrueActivities": [
+                        {
+                            "name": "Step End",
+                            "description": "Updates STEP_RUN_TBL with the final status and end time, and reflects the same status on STEP_CTRL_TBL to mark the step as complete for the current cycle.",
+                            "type": "SqlServerStoredProcedure",
+                            "dependsOn": [],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "storedProcedureName": {
+                                    "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_UPDATE_STEP_END",
+                                    "type": "Expression"
+                                },
+                                "storedProcedureParameters": {
+                                    "STATUS": {
+                                        "value": "S",
+                                        "type": "String"
+                                    },
+                                    "STEP_SK": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.STEP_SK_RAW",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int32"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_asql_abc_metadata",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Step Success Email",
+                            "type": "WebActivity",
+                            "dependsOn": [
+                                {
+                                    "activity": "Step End",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "method": "POST",
+                                "url": {
+                                    "value": "@pipeline().globalParameters.LogicAppURL",
+                                    "type": "Expression"
+                                },
+                                "body": {
+                                    "value": "{\n\"message\" : \"Hi Team,\n<p>Step Name:@{pipeline().Pipeline} </p>\n <p>Run ID:@{pipeline().RunId} </p>\n <p> Status: Success</p>\",\n\"dataFactoryName\" : \"@{pipeline().DataFactory}\", \n\"pipelineName\" : \"@{pipeline().Pipeline}\"\n}",
+                                    "type": "Expression"
+                                }
+                            }
+                        }
+                    ]
+                }
+            }
+        ],
+        "parameters": {
+            "FORCE_IND": {
+                "type": "string"
+            },
+            "STEP_SK_RAW": {
+                "type": "string"
+            },
+            "ASQL_SCHEMA": {
+                "type": "string"
+            },
+            "STEP_SK_REPLICA": {
+                "type": "string"
+            },
+            "XCENTER": {
+                "type": "string"
+            },
+            "CYC_RUN_SK": {
+                "type": "string"
+            },
+            "ADLS_CLIENT_DATA_PATH": {
+                "type": "string"
+            },
+            "ADLS_RAW_PATH": {
+                "type": "string"
+            },
+            "FORCE_TRUNCATE": {
+                "type": "string"
+            },
+            "Processed_DB": {
+                "type": "string"
+            },
+            "Processed_Schema": {
+                "type": "string"
+            },
+            "ADLS_REPLICA_PATH": {
+                "type": "string"
+            },
+            "TYPE_DATA": {
+                "type": "string"
+            },
+            "CYC_SK": {
+                "type": "string"
+            }
+        },
+        "folder": {
+            "name": "insurance_claims_domain"
+        },
+        "annotations": [],
+        "lastPublishTime": "2026-04-07T07:04:06Z"
+    },
+    "type": "Microsoft.DataFactory/factories/pipelines"
+}

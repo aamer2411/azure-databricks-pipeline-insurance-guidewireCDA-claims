@@ -1,0 +1,1179 @@
+{
+    "name": "pl_c_replica_to_refined",
+    "properties": {
+        "activities": [
+            {
+                "name": "Step Start",
+                "description": "Marks the Raw to Replica step as in-progress by inserting a new run record into STEP_RUN_TBL, updating STEP_STS_CD to in-progress in STEP_CTRL_TBL, and returning STEP_RUN_SK and CYC_RUN_SK for use by downstream activities.",
+                "type": "SqlServerStoredProcedure",
+                "dependsOn": [],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 2,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "storedProcedureName": {
+                        "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_UPDATE_STEP_START",
+                        "type": "Expression"
+                    },
+                    "storedProcedureParameters": {
+                        "FORCE_IND": {
+                            "value": {
+                                "value": "@pipeline().parameters.FORCE_IND",
+                                "type": "Expression"
+                            },
+                            "type": "String"
+                        },
+                        "STEP_SK": {
+                            "value": {
+                                "value": "@pipeline().parameters.STEP_SK",
+                                "type": "Expression"
+                            },
+                            "type": "Int32"
+                        }
+                    }
+                },
+                "linkedServiceName": {
+                    "referenceName": "ls_icd_asql_abc_metadata",
+                    "type": "LinkedServiceReference"
+                }
+            },
+            {
+                "name": "PROC_WRAPPER_RPL_RFN",
+                "description": "Clears and rebuilds TABLES_TO_LOAD_RFN with active Replica→Refined jobs, ready for the ForEach to iterate.",
+                "type": "SqlServerStoredProcedure",
+                "dependsOn": [
+                    {
+                        "activity": "Step Start",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 2,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "storedProcedureName": {
+                        "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_WRAPPER_RPL_RFN",
+                        "type": "Expression"
+                    },
+                    "storedProcedureParameters": {
+                        "STEP_SK": {
+                            "value": {
+                                "value": "@pipeline().parameters.STEP_SK",
+                                "type": "Expression"
+                            },
+                            "type": "Int32"
+                        },
+                        "X_CENTER": {
+                            "value": {
+                                "value": "@pipeline().parameters.XCENTER",
+                                "type": "Expression"
+                            },
+                            "type": "String"
+                        }
+                    }
+                },
+                "linkedServiceName": {
+                    "referenceName": "ls_icd_asql_abc_metadata",
+                    "type": "LinkedServiceReference"
+                }
+            },
+            {
+                "name": "Get Tables To Load Refined",
+                "type": "Lookup",
+                "dependsOn": [
+                    {
+                        "activity": "PROC_WRAPPER_RPL_RFN",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "source": {
+                        "type": "AzureSqlSource",
+                        "sqlReaderQuery": {
+                            "value": "SELECT TGT_FILE_TBL, SRC_PATH_SCHEM, TGT_PATH_SCHEM, CAST(JOB_SK AS VARCHAR) AS JOB_SK, STEP_SK FROM @{pipeline().parameters.ASQL_SCHEMA}.TABLES_TO_LOAD_RFN WHERE XCENTER='@{pipeline().parameters.XCENTER}'",
+                            "type": "Expression"
+                        },
+                        "queryTimeout": "02:00:00",
+                        "partitionOption": "None"
+                    },
+                    "dataset": {
+                        "referenceName": "ds_asql_abc",
+                        "type": "DatasetReference"
+                    },
+                    "firstRowOnly": false
+                }
+            },
+            {
+                "name": "Fetch CUR_CYC_RUN_SK",
+                "type": "Lookup",
+                "dependsOn": [
+                    {
+                        "activity": "PROC_WRAPPER_RPL_RFN",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 2,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "source": {
+                        "type": "AzureSqlSource",
+                        "sqlReaderQuery": {
+                            "value": "SELECT CAST(CYC_CUR_RUN_SK AS VARCHAR) AS CYC_CUR_RUN_SK FROM @{pipeline().parameters.ASQL_SCHEMA}.CYC_CTRL_TBL WHERE CYC_SK=@{pipeline().parameters.CYC_SK}",
+                            "type": "Expression"
+                        },
+                        "queryTimeout": "02:00:00",
+                        "partitionOption": "None"
+                    },
+                    "dataset": {
+                        "referenceName": "ds_asql_abc",
+                        "type": "DatasetReference"
+                    }
+                }
+            },
+            {
+                "name": "Fetch PREV_CYC_RUN_SK",
+                "type": "Lookup",
+                "dependsOn": [
+                    {
+                        "activity": "Get Tables To Load Refined",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    },
+                    {
+                        "activity": "Fetch CUR_CYC_RUN_SK",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 2,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "source": {
+                        "type": "AzureSqlSource",
+                        "sqlReaderQuery": {
+                            "value": "SELECT TOP 1 CYC_RUN_SK AS PREV_REFINED_CYC_RUN_SK FROM abc.CYC_RUN_TBL WHERE CYC_SK = @{pipeline().parameters.CYC_SK} AND CYC_RUN_SK < @{activity('Fetch CUR_CYC_RUN_SK').output.firstRow['CYC_CUR_RUN_SK']} AND CYC_STS_CD = 'S' ORDER BY CYC_RUN_SK DESC",
+                            "type": "Expression"
+                        },
+                        "queryTimeout": "02:00:00",
+                        "partitionOption": "None"
+                    },
+                    "dataset": {
+                        "referenceName": "ds_asql_abc",
+                        "type": "DatasetReference"
+                    }
+                }
+            },
+            {
+                "name": "FINAL_PREVIOUS_CYC_RUN_SK",
+                "type": "SetVariable",
+                "dependsOn": [
+                    {
+                        "activity": "Fetch PREV_CYC_RUN_SK",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "variableName": "PREVIOUS_CYC_RUN_SK",
+                    "value": {
+                        "value": "@if(equals(activity('Fetch PREV_CYC_RUN_SK').output.firstRow['PREV_REFINED_CYC_RUN_SK'],null),0,activity('Fetch PREV_CYC_RUN_SK').output.firstRow['PREV_REFINED_CYC_RUN_SK'] )",
+                        "type": "Expression"
+                    }
+                }
+            },
+            {
+                "name": "Load Data To Refined Tables",
+                "type": "ForEach",
+                "dependsOn": [
+                    {
+                        "activity": "FINAL_PREVIOUS_CYC_RUN_SK",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "userProperties": [],
+                "typeProperties": {
+                    "items": {
+                        "value": "@activity('Get Tables To Load Refined').output.value",
+                        "type": "Expression"
+                    },
+                    "batchCount": 40,
+                    "activities": [
+                        {
+                            "name": "Job Start",
+                            "description": "",
+                            "type": "SqlServerStoredProcedure",
+                            "dependsOn": [],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "storedProcedureName": {
+                                    "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_UPDATE_JOB_START",
+                                    "type": "Expression"
+                                },
+                                "storedProcedureParameters": {
+                                    "JOB_SK": {
+                                        "value": {
+                                            "value": "@item().JOB_SK",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int64"
+                                    },
+                                    "STEP_SK": {
+                                        "value": {
+                                            "value": "@item().STEP_SK",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int32"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_asql_abc_metadata",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Replica To Refined Data Load",
+                            "description": "Transforms replica Delta tables into refined Delta tables using SCD Type 2. For each refined table (claim_detail or claim_financial), it runs a pre-configured JOIN query (stored in abc.JOB_PARM_TBL) to pull and enrich data from replica, computes hash keys to detect changes, then either creates the table from scratch (initial load) or merges changes in as versioned rows (incremental load) — keeping full history where old versions are expired (ETL_ActiveRow_Flag='N') and new versions inserted. Also propagates soft-deletes and retired records from replica into refined by marking those rows inactive.\n\nCompared to the previous recon/validation notebooks:\n  - Notebooks 08/09/10 — stay entirely within the replica layer; read raw parquet and replica tables to verify counts match\n  - Notebook 11 — stays within the replica layer; flags bad data rows\n  - Notebook 12 — first notebook to write to a new layer (replica → refined); adds SCD2 history tracking and business-level joins that didn't exist in replica",
+                            "type": "DatabricksNotebook",
+                            "dependsOn": [
+                                {
+                                    "activity": "Job Start",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "notebookPath": "/insurance_claims_domain/12 Load Replica to Refined - SCD Type 2",
+                                "baseParameters": {
+                                    "JOB_SK": {
+                                        "value": "@item().JOB_SK",
+                                        "type": "Expression"
+                                    },
+                                    "config_schema": {
+                                        "value": "@pipeline().parameters.ASQL_SCHEMA",
+                                        "type": "Expression"
+                                    },
+                                    "CYC_RUN_SK": {
+                                        "value": "@activity('Fetch CUR_CYC_RUN_SK').output.firstRow['CYC_CUR_RUN_SK']",
+                                        "type": "Expression"
+                                    },
+                                    "Catalog": {
+                                        "value": "@pipeline().parameters.CATALOG",
+                                        "type": "Expression"
+                                    },
+                                    "DB": {
+                                        "value": "@item().TGT_PATH_SCHEM",
+                                        "type": "Expression"
+                                    },
+                                    "SRC_SCHEMA": {
+                                        "value": "@item().SRC_PATH_SCHEM",
+                                        "type": "Expression"
+                                    },
+                                    "ADLS_REFINED_PATH": {
+                                        "value": "@pipeline().parameters.ADLS_REFINED_PATH",
+                                        "type": "Expression"
+                                    },
+                                    "type_data": {
+                                        "value": "@pipeline().parameters.type_data",
+                                        "type": "Expression"
+                                    },
+                                    "CYC_SK": {
+                                        "value": "@pipeline().parameters.CYC_SK",
+                                        "type": "Expression"
+                                    },
+                                    "prev_refined_cyc_run_sk": {
+                                        "value": "@string(variables('PREVIOUS_CYC_RUN_SK'))",
+                                        "type": "Expression"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_adb",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Job End",
+                            "description": "",
+                            "type": "SqlServerStoredProcedure",
+                            "dependsOn": [
+                                {
+                                    "activity": "Replica To Refined Data Load",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "storedProcedureName": {
+                                    "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_UPDATE_JOB_END",
+                                    "type": "Expression"
+                                },
+                                "storedProcedureParameters": {
+                                    "DATA_READ": {
+                                        "value": "0",
+                                        "type": "String"
+                                    },
+                                    "DATA_WRITTEN": {
+                                        "value": "0",
+                                        "type": "String"
+                                    },
+                                    "ERR_MSG": {
+                                        "value": null,
+                                        "type": "String"
+                                    },
+                                    "JOB_SK": {
+                                        "value": {
+                                            "value": "@item().JOB_SK",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int64"
+                                    },
+                                    "RCRD_DEL": {
+                                        "value": "0",
+                                        "type": "Int64"
+                                    },
+                                    "RCRD_INS": {
+                                        "value": {
+                                            "value": "@activity('Replica To Refined Data Load').output['runOutput']['ROWS_INSERTED']",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int32"
+                                    },
+                                    "RCRD_UPD": {
+                                        "value": {
+                                            "value": "@activity('Replica To Refined Data Load').output['runOutput']['ROWS_UPDATED']",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int32"
+                                    },
+                                    "ROWS_LOADED": {
+                                        "value": {
+                                            "value": "@activity('Replica To Refined Data Load').output['runOutput']['ROWS_LOADED']",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int64"
+                                    },
+                                    "ROWS_READ": {
+                                        "value": {
+                                            "value": "@activity('Replica To Refined Data Load').output['runOutput']['ROWS_READ']",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int64"
+                                    },
+                                    "STATUS": {
+                                        "value": {
+                                            "value": "@activity('Replica To Refined Data Load').output['runOutput']['STATUS']",
+                                            "type": "Expression"
+                                        },
+                                        "type": "String"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_asql_abc_metadata",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Job End Fail",
+                            "description": "",
+                            "type": "SqlServerStoredProcedure",
+                            "dependsOn": [
+                                {
+                                    "activity": "Replica To Refined Data Load",
+                                    "dependencyConditions": [
+                                        "Failed"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "storedProcedureName": {
+                                    "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_UPDATE_JOB_END",
+                                    "type": "Expression"
+                                },
+                                "storedProcedureParameters": {
+                                    "DATA_READ": {
+                                        "value": null,
+                                        "type": "String"
+                                    },
+                                    "DATA_WRITTEN": {
+                                        "value": null,
+                                        "type": "String"
+                                    },
+                                    "ERR_MSG": {
+                                        "value": {
+                                            "value": "@concat(activity('Replica To Refined Data Load').output.runPageUrl, ' | ', activity('Replica To Refined Data Load').output.runError)",
+                                            "type": "Expression"
+                                        },
+                                        "type": "String"
+                                    },
+                                    "JOB_SK": {
+                                        "value": {
+                                            "value": "@item().JOB_SK",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int64"
+                                    },
+                                    "RCRD_DEL": {
+                                        "value": "0",
+                                        "type": "Int32"
+                                    },
+                                    "RCRD_INS": {
+                                        "value": "0",
+                                        "type": "Int32"
+                                    },
+                                    "RCRD_UPD": {
+                                        "value": "0",
+                                        "type": "Int32"
+                                    },
+                                    "ROWS_LOADED": {
+                                        "value": "0",
+                                        "type": "Int64"
+                                    },
+                                    "ROWS_READ": {
+                                        "value": "0",
+                                        "type": "Int64"
+                                    },
+                                    "STATUS": {
+                                        "value": "F",
+                                        "type": "String"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_asql_abc_metadata",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Lookup On Job Status",
+                            "type": "Lookup",
+                            "dependsOn": [
+                                {
+                                    "activity": "Job End",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "source": {
+                                    "type": "AzureSqlSource",
+                                    "sqlReaderQuery": {
+                                        "value": "SELECT JOB_STS_CD FROM @{pipeline().parameters.ASQL_SCHEMA}.JOB_CTRL_TBL where JOB_SK = @{item().JOB_SK}",
+                                        "type": "Expression"
+                                    },
+                                    "queryTimeout": "02:00:00",
+                                    "partitionOption": "None"
+                                },
+                                "dataset": {
+                                    "referenceName": "ds_asql_abc",
+                                    "type": "DatasetReference"
+                                }
+                            }
+                        },
+                        {
+                            "name": "Job Failure Email",
+                            "type": "WebActivity",
+                            "dependsOn": [
+                                {
+                                    "activity": "Job End Fail",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 0,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "method": "POST",
+                                "url": {
+                                    "value": "@pipeline().globalParameters.LogicAppURL",
+                                    "type": "Expression"
+                                },
+                                "body": {
+                                    "value": "{\n\"message\" : \"Hi Team,\n<p>Step Name:@{pipeline().Pipeline} </p>\n <p>Run ID:@{pipeline().RunId} </p>\n <p> Status: Failed</p>\",\n\"dataFactoryName\" : \"@{pipeline().DataFactory}\", \n\"pipelineName\" : \"@{pipeline().Pipeline}\"\n}",
+                                    "type": "Expression"
+                                }
+                            }
+                        },
+                        {
+                            "name": "If JOB_STS_CD Is F",
+                            "type": "IfCondition",
+                            "dependsOn": [
+                                {
+                                    "activity": "Lookup On Job Status",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "userProperties": [],
+                            "typeProperties": {
+                                "expression": {
+                                    "value": "@if(equals(activity('Lookup On Job Status').output.firstRow['JOB_STS_CD'], 'F'), true, false)",
+                                    "type": "Expression"
+                                },
+                                "ifTrueActivities": [
+                                    {
+                                        "name": "Job Failure Email Based On Job Status",
+                                        "type": "WebActivity",
+                                        "dependsOn": [],
+                                        "policy": {
+                                            "timeout": "0.12:00:00",
+                                            "retry": 2,
+                                            "retryIntervalInSeconds": 30,
+                                            "secureOutput": false,
+                                            "secureInput": false
+                                        },
+                                        "userProperties": [],
+                                        "typeProperties": {
+                                            "method": "POST",
+                                            "url": {
+                                                "value": "@pipeline().globalParameters.LogicAppURL",
+                                                "type": "Expression"
+                                            },
+                                            "body": {
+                                                "value": "{\n\"message\" : \"Hi Team,\n<p>Step Name:@{pipeline().Pipeline} </p>\n <p>Run ID:@{pipeline().RunId} </p>\n <p> Status: Failed</p>\",\n\"dataFactoryName\" : \"@{pipeline().DataFactory}\", \n\"pipelineName\" : \"@{pipeline().Pipeline}\"\n}",
+                                                "type": "Expression"
+                                            }
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                "name": "Step End Fail",
+                "type": "SqlServerStoredProcedure",
+                "dependsOn": [
+                    {
+                        "activity": "Load Data To Refined Tables",
+                        "dependencyConditions": [
+                            "Failed"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 2,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "storedProcedureName": {
+                        "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_UPDATE_STEP_END",
+                        "type": "Expression"
+                    },
+                    "storedProcedureParameters": {
+                        "STATUS": {
+                            "value": "F",
+                            "type": "String"
+                        },
+                        "STEP_SK": {
+                            "value": {
+                                "value": "@pipeline().parameters.STEP_SK",
+                                "type": "Expression"
+                            },
+                            "type": "Int32"
+                        }
+                    }
+                },
+                "linkedServiceName": {
+                    "referenceName": "ls_icd_asql_abc_metadata",
+                    "type": "LinkedServiceReference"
+                }
+            },
+            {
+                "name": "Cycle End Fail",
+                "type": "SqlServerStoredProcedure",
+                "dependsOn": [
+                    {
+                        "activity": "Load Data To Refined Tables",
+                        "dependencyConditions": [
+                            "Failed"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 2,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "storedProcedureName": {
+                        "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_UPDATE_CYC_END",
+                        "type": "Expression"
+                    },
+                    "storedProcedureParameters": {
+                        "CYC_SK": {
+                            "value": {
+                                "value": "@pipeline().parameters.CYC_SK",
+                                "type": "Expression"
+                            },
+                            "type": "Int32"
+                        }
+                    }
+                },
+                "linkedServiceName": {
+                    "referenceName": "ls_icd_asql_abc_metadata",
+                    "type": "LinkedServiceReference"
+                }
+            },
+            {
+                "name": "Refined Table Balancing - Final Reconciliation",
+                "type": "DatabricksNotebook",
+                "dependsOn": [
+                    {
+                        "activity": "Load Data To Refined Tables",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "notebookPath": "/insurance_claims_domain/13 Refined Table Balancing - Final Reconciliation",
+                    "baseParameters": {
+                        "CYC_SK": {
+                            "value": "@pipeline().parameters.CYC_SK",
+                            "type": "Expression"
+                        },
+                        "ASQL_SCHEMA": {
+                            "value": "@pipeline().parameters.ASQL_SCHEMA",
+                            "type": "Expression"
+                        },
+                        "CATALOG": {
+                            "value": "@pipeline().parameters.CATALOG",
+                            "type": "Expression"
+                        },
+                        "REPLICA_SCHEMA": {
+                            "value": "@pipeline().parameters.REPLICA_SCHEMA",
+                            "type": "Expression"
+                        },
+                        "REFINED_SCHEMA": {
+                            "value": "@pipeline().parameters.REFINED_SCHEMA",
+                            "type": "Expression"
+                        }
+                    }
+                },
+                "linkedServiceName": {
+                    "referenceName": "ls_icd_adb",
+                    "type": "LinkedServiceReference"
+                }
+            },
+            {
+                "name": "If Condition",
+                "type": "IfCondition",
+                "dependsOn": [
+                    {
+                        "activity": "Refined Table Balancing - Final Reconciliation",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "userProperties": [],
+                "typeProperties": {
+                    "expression": {
+                        "value": "@equals(activity('Refined Table Balancing - Final Reconciliation').output.runOutput['Balance_Recon_Status'],'S')",
+                        "type": "Expression"
+                    },
+                    "ifFalseActivities": [
+                        {
+                            "name": "Step End Fail due to Final Recon Failure",
+                            "type": "SqlServerStoredProcedure",
+                            "dependsOn": [],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "storedProcedureName": {
+                                    "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_UPDATE_STEP_END",
+                                    "type": "Expression"
+                                },
+                                "storedProcedureParameters": {
+                                    "STATUS": {
+                                        "value": "F",
+                                        "type": "String"
+                                    },
+                                    "STEP_SK": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.STEP_SK",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int32"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_asql_abc_metadata",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Cycle End Fail due to Final Recon Failure",
+                            "type": "SqlServerStoredProcedure",
+                            "dependsOn": [
+                                {
+                                    "activity": "Step End Fail due to Final Recon Failure",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "storedProcedureName": {
+                                    "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_UPDATE_CYC_END",
+                                    "type": "Expression"
+                                },
+                                "storedProcedureParameters": {
+                                    "CYC_SK": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.CYC_SK",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int32"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_asql_abc_metadata",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Refined Recon Failure",
+                            "type": "WebActivity",
+                            "dependsOn": [
+                                {
+                                    "activity": "Cycle End Fail due to Final Recon Failure",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "method": "POST",
+                                "url": {
+                                    "value": "@pipeline().globalParameters.LogicAppURL",
+                                    "type": "Expression"
+                                },
+                                "body": {
+                                    "message": "Hi,<p>@{pipeline().Pipeline} with Run ID @{pipeline().RunId} has failed due to Source and Replica Balance Recon Mismatch.</p>",
+                                    "dataFactoryName": "@{pipeline().DataFactory}",
+                                    "pipelineName": "@{pipeline().Pipeline}"
+                                }
+                            }
+                        },
+                        {
+                            "name": "Fail Pipeline - Final Recon Failure",
+                            "type": "Fail",
+                            "dependsOn": [
+                                {
+                                    "activity": "Refined Recon Failure",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "userProperties": [],
+                            "typeProperties": {
+                                "message": "Refined Balance Recon Failed ",
+                                "errorCode": "F"
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                "name": "Lookup On Job Status To Determine Step Status",
+                "type": "Lookup",
+                "dependsOn": [
+                    {
+                        "activity": "If Condition",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 2,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "source": {
+                        "type": "AzureSqlSource",
+                        "sqlReaderQuery": {
+                            "value": "SELECT COUNT(JOB_STS_CD) AS CNT FROM @{pipeline().parameters.ASQL_SCHEMA}.JOB_CTRL_TBL WHERE STEP_SK =@{pipeline().parameters.STEP_SK} AND JOB_TYP_CD='RFN' AND ACTI_IND='Y' AND JOB_STS_CD='F'",
+                            "type": "Expression"
+                        },
+                        "queryTimeout": "02:00:00",
+                        "partitionOption": "None"
+                    },
+                    "dataset": {
+                        "referenceName": "ds_asql_abc",
+                        "type": "DatasetReference"
+                    }
+                }
+            },
+            {
+                "name": "If If All Jobs Are Successful",
+                "type": "IfCondition",
+                "dependsOn": [
+                    {
+                        "activity": "Lookup On Job Status To Determine Step Status",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "userProperties": [],
+                "typeProperties": {
+                    "expression": {
+                        "value": "@if(equals(activity('Lookup On Job Status To Determine Step Status').output.firstRow['CNT'], 0), true, false)",
+                        "type": "Expression"
+                    },
+                    "ifFalseActivities": [
+                        {
+                            "name": "Step End Failure",
+                            "type": "SqlServerStoredProcedure",
+                            "dependsOn": [],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "storedProcedureName": {
+                                    "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_UPDATE_STEP_END",
+                                    "type": "Expression"
+                                },
+                                "storedProcedureParameters": {
+                                    "STATUS": {
+                                        "value": "F",
+                                        "type": "String"
+                                    },
+                                    "STEP_SK": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.STEP_SK",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int32"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_asql_abc_metadata",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Cycle End Failure",
+                            "type": "SqlServerStoredProcedure",
+                            "dependsOn": [
+                                {
+                                    "activity": "Step End Failure",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "storedProcedureName": {
+                                    "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_UPDATE_CYC_END",
+                                    "type": "Expression"
+                                },
+                                "storedProcedureParameters": {
+                                    "CYC_SK": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.CYC_SK",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int32"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_asql_abc_metadata",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Replica To Refined Step Fail",
+                            "type": "Fail",
+                            "dependsOn": [
+                                {
+                                    "activity": "Cycle End Failure",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "userProperties": [],
+                            "typeProperties": {
+                                "message": "Raw To Replica Step Failed",
+                                "errorCode": "F"
+                            }
+                        }
+                    ],
+                    "ifTrueActivities": [
+                        {
+                            "name": "Step End",
+                            "type": "SqlServerStoredProcedure",
+                            "dependsOn": [],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "storedProcedureName": {
+                                    "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_UPDATE_STEP_END",
+                                    "type": "Expression"
+                                },
+                                "storedProcedureParameters": {
+                                    "STATUS": {
+                                        "value": "S",
+                                        "type": "String"
+                                    },
+                                    "STEP_SK": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.STEP_SK",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int32"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_asql_abc_metadata",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Step Success Email",
+                            "type": "WebActivity",
+                            "dependsOn": [
+                                {
+                                    "activity": "Step End",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "method": "POST",
+                                "url": {
+                                    "value": "@pipeline().globalParameters.LogicAppURL",
+                                    "type": "Expression"
+                                },
+                                "body": {
+                                    "value": "{\n\"message\" : \"Hi Team,\n<p>Step Name:@{pipeline().Pipeline} </p>\n <p>Run ID:@{pipeline().RunId} </p>\n <p> Status: Success</p>\",\n\"dataFactoryName\" : \"@{pipeline().DataFactory}\", \n\"pipelineName\" : \"@{pipeline().Pipeline}\"\n}",
+                                    "type": "Expression"
+                                }
+                            }
+                        }
+                    ]
+                }
+            }
+        ],
+        "parameters": {
+            "ASQL_SCHEMA": {
+                "type": "string"
+            },
+            "FORCE_IND": {
+                "type": "string"
+            },
+            "STEP_SK": {
+                "type": "string"
+            },
+            "XCENTER": {
+                "type": "string"
+            },
+            "CYC_SK": {
+                "type": "string"
+            },
+            "CATALOG": {
+                "type": "string"
+            },
+            "ADLS_REFINED_PATH": {
+                "type": "string"
+            },
+            "TYPE_DATA": {
+                "type": "string"
+            },
+            "REPLICA_SCHEMA": {
+                "type": "string"
+            },
+            "REFINED_SCHEMA": {
+                "type": "string"
+            }
+        },
+        "variables": {
+            "PREVIOUS_CYC_RUN_SK": {
+                "type": "Integer"
+            }
+        },
+        "folder": {
+            "name": "insurance_claims_domain"
+        },
+        "annotations": [],
+        "lastPublishTime": "2026-04-07T09:25:30Z"
+    },
+    "type": "Microsoft.DataFactory/factories/pipelines"
+}

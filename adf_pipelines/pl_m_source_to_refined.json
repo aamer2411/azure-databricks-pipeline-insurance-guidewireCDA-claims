@@ -1,0 +1,966 @@
+{
+    "name": "pl_m_source_to_refined",
+    "properties": {
+        "description": "This pipeline orchestrates the end to end pipeline from source (ideally s3 where client lands data, but here we simulate it with ADLS) to external UC table in silver layer",
+        "activities": [
+            {
+                "name": "Wait until prev run of cycle is C or F",
+                "description": "Here we check previous run status of the cycle (CYC_SK = 101) from Azure sql metadata table. We wait until it completes (C) or Fails (F). The loop exits only when the said condition is satisfied.\n\nThis activity takes input from its Lookup activity\n\nNote:\nAlthough we have defined a table while creating the dataset (ds_asql_abc), the \"Query\" setting in the Lookup activity overrides that predefined table and allows us to query any table within that predefined schema.",
+                "type": "Until",
+                "dependsOn": [
+                    {
+                        "activity": "Client Dummy Data Load",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "userProperties": [],
+                "typeProperties": {
+                    "expression": {
+                        "value": "@or(equals(activity('Get CYC Status').output.firstRow['CYC_STS_CD'], 'C'),equals(activity('Get CYC Status').output.firstRow['CYC_STS_CD'], 'F'))",
+                        "type": "Expression"
+                    },
+                    "activities": [
+                        {
+                            "name": "Get CYC Status",
+                            "description": "We check the run status (CYC_STS_CD) for this pipeline ((CYC_SK = 101) from CYC_CTRL_TBL table\n\nCYC_SK value is passed from pipeline parameter CYC_SK",
+                            "type": "Lookup",
+                            "dependsOn": [],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 0,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "source": {
+                                    "type": "AzureSqlSource",
+                                    "sqlReaderQuery": {
+                                        "value": "SELECT CYC_STS_CD FROM @{pipeline().parameters.ASQL_SCHEMA}.CYC_CTRL_TBL WHERE CYC_SK = '@{pipeline().parameters.CYC_SK}'",
+                                        "type": "Expression"
+                                    },
+                                    "queryTimeout": "02:00:00",
+                                    "partitionOption": "None"
+                                },
+                                "dataset": {
+                                    "referenceName": "ds_asql_abc",
+                                    "type": "DatasetReference"
+                                }
+                            }
+                        }
+                    ],
+                    "timeout": "0.12:00:00"
+                }
+            },
+            {
+                "name": "Wait until prev run of Step and Job is C or F",
+                "description": "Checks previous run status for Steps & Jobs of cycle (CYC_SK = 101) from Azure SQL metadata tables. Here we wait until no Steps or Jobs remain \"I\" (In-progress), meaning all are either C (Complete) or F (Fail). The loop exits only when the said condition is satisfied.\n\nLogic:\nInstead of checking \"all records = C or F\" (complex), we count records with 'I' status. When count = 0, all records have reached terminal status (C or F).\n\nThis activity takes input from its Lookup activity\n\nNote:\nAlthough we have defined a table while creating the dataset (ds_asql_abc), the \"Query\" setting in the Lookup activity overrides that predefined table and allows us to query any table within that predefined schema.",
+                "type": "Until",
+                "dependsOn": [
+                    {
+                        "activity": "Wait until prev run of cycle is C or F",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "userProperties": [],
+                "typeProperties": {
+                    "expression": {
+                        "value": "@and(equals(activity('Get STEP Status').output.firstRow['STEP_STS_CD_COUNT'], 0),equals(activity('Get JOB Status').output.firstRow['JOB_STS_CD_COUNT'], 0))",
+                        "type": "Expression"
+                    },
+                    "activities": [
+                        {
+                            "name": "Get STEP Status",
+                            "description": "We check how many steps are still in‑progress (STEP_STS_CD = 'I') for this pipeline (STEP_SK in [RAW, REPLICA, REFINED]) from STEP_CTRL_TBL table.\n\nSTEP_SK values (10110 & 10120 & 10230) are passed from pipeline parameters STEP_SK_RAW, STEP_SK_REPLICA, STEP_SK_REFINED respectively.",
+                            "type": "Lookup",
+                            "dependsOn": [],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 0,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "source": {
+                                    "type": "AzureSqlSource",
+                                    "sqlReaderQuery": {
+                                        "value": "SELECT COUNT(STEP_STS_CD) AS STEP_STS_CD_COUNT FROM @{pipeline().parameters.ASQL_SCHEMA}.STEP_CTRL_TBL WHERE STEP_SK IN ('@{pipeline().parameters.STEP_SK_RAW}','@{pipeline().parameters.STEP_SK_REPLICA}','@{pipeline().parameters.STEP_SK_REFINED}') and STEP_STS_CD='I'",
+                                        "type": "Expression"
+                                    },
+                                    "queryTimeout": "02:00:00",
+                                    "partitionOption": "None"
+                                },
+                                "dataset": {
+                                    "referenceName": "ds_asql_abc",
+                                    "type": "DatasetReference"
+                                }
+                            }
+                        },
+                        {
+                            "name": "Get JOB Status",
+                            "description": "We check how many jobs are still in‑progress (JOB_STS_CD = 'I') for this pipeline (STEP_SK in [RAW, REPLICA, REFINED]) from JOB_CTRL_TBL table.\n\nSTEP_SK values (10110 & 10120 & 10230) are passed from pipeline parameters STEP_SK_RAW, STEP_SK_REPLICA, STEP_SK_REFINED respectively.",
+                            "type": "Lookup",
+                            "dependsOn": [
+                                {
+                                    "activity": "Get STEP Status",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 0,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "source": {
+                                    "type": "AzureSqlSource",
+                                    "sqlReaderQuery": {
+                                        "value": "SELECT COUNT(JOB_STS_CD) as JOB_STS_CD_COUNT FROM @{pipeline().parameters.ASQL_SCHEMA}.JOB_CTRL_TBL WHERE STEP_SK IN ('@{pipeline().parameters.STEP_SK_RAW}','@{pipeline().parameters.STEP_SK_REPLICA}','@{pipeline().parameters.STEP_SK_REFINED}') and JOB_STS_CD='I'\n",
+                                        "type": "Expression"
+                                    },
+                                    "queryTimeout": "02:00:00",
+                                    "partitionOption": "None"
+                                },
+                                "dataset": {
+                                    "referenceName": "ds_asql_abc",
+                                    "type": "DatasetReference"
+                                }
+                            }
+                        }
+                    ],
+                    "timeout": "0.12:00:00"
+                }
+            },
+            {
+                "name": "Check cycle run status",
+                "description": "Here we check if the Cycle run has completed (CYC_STS_CD = 'C') from the CYC_CTRL_TBL table using the \"Get CYC Status\" lookup activity.\n\nIt basically runs the 'Get CYC Status' lookup, grabs the first row, checks the column CYC_STS_CD — if its value is 'C', returns true; otherwise returns false.\"",
+                "type": "IfCondition",
+                "dependsOn": [
+                    {
+                        "activity": "Wait until prev run of Step and Job is C or F",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "userProperties": [],
+                "typeProperties": {
+                    "expression": {
+                        "value": "@if(equals(activity('Get CYC Status').output.firstRow['CYC_STS_CD'], 'C'), true, false)",
+                        "type": "Expression"
+                    },
+                    "ifTrueActivities": [
+                        {
+                            "name": "Cycle Start",
+                            "description": "This stored procedure prepares cycle tracking tables:\n\n1. Adds new row to CYC_RUN_TBL (with CYC_STS_CD = 'I' & CYC_RUN_SK for the newly created row)\n2. Updates CYC_CTRL_TBL (sets cycle status CYC_STS_CD ='I' & updates CYC_CUR_RUN_SK with the value of CYC_RUN_SK from above point)\n3. Resets STEP_CTRL_TBL (all steps back to STEP_STS_CD = 'C') — only if FORCE_IND='N' ###Need to check this part as downstream activities should already have made this C due to which Cycle status becomes C\n\nParameters:\nCYC_SK = Identifies which cycle to start (e.g., 101)\nFORCE_IND = Controls step reset behaviour — 'N' (default) resets all steps for a fresh run; 'Y' preserves already-completed steps to allow mid-run restart without re-running finished steps\nPL_RUN_ID = Current ADF pipeline run ID (auto-generated unique GUID) for complete audit trail. Auto-populated by ADF",
+                            "type": "SqlServerStoredProcedure",
+                            "dependsOn": [],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 0,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "storedProcedureName": {
+                                    "value": "@{pipeline().parameters.ASQL_SCHEMA}.[PROC_UPDATE_CYC_START]",
+                                    "type": "Expression"
+                                },
+                                "storedProcedureParameters": {
+                                    "CYC_SK": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.CYC_SK",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int32"
+                                    },
+                                    "PL_RUN_ID": {
+                                        "value": {
+                                            "value": "@pipeline().RunId",
+                                            "type": "Expression"
+                                        },
+                                        "type": "String"
+                                    },
+                                    "FORCE_IND": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.FORCE_IND",
+                                            "type": "Expression"
+                                        },
+                                        "type": "String"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_asql_abc_metadata",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Copy Manifest File from Source to ADLS",
+                            "description": "We copy the manifest.json file from client storage account to our storage account",
+                            "type": "DatabricksNotebook",
+                            "dependsOn": [
+                                {
+                                    "activity": "Cycle Start",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 0,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "notebookPath": "/insurance_claims_domain/01 Copy Manifest File from Source to ADLS",
+                                "baseParameters": {
+                                    "ADLS_RAW_PATH": {
+                                        "value": "@pipeline().parameters.ADLS_RAW_PATH",
+                                        "type": "Expression"
+                                    },
+                                    "CLIENT_DATA_PATH": {
+                                        "value": "@pipeline().parameters.CLIENT_DATA_PATH",
+                                        "type": "Expression"
+                                    },
+                                    "TYPE_DATA": {
+                                        "value": "@pipeline().parameters.TYPE_DATA",
+                                        "type": "Expression"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_adb",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Load Manifest Data to Azure SQL",
+                            "description": "The notebook:\n- Reads manifest.json from ADLS\n- Parses each table entry in it\n- Writes those rows into abc.MANIFEST\n- Then calls the stored proc to update abc.TABLE_LOAD_METADATA ",
+                            "type": "DatabricksNotebook",
+                            "dependsOn": [
+                                {
+                                    "activity": "Copy Manifest File from Source to ADLS",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 0,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "notebookPath": "/insurance_claims_domain/02 Load Manifest Data to Azure SQL",
+                                "baseParameters": {
+                                    "ADLS_RAW_PATH": {
+                                        "value": "@pipeline().parameters.ADLS_RAW_PATH",
+                                        "type": "Expression"
+                                    },
+                                    "TYPE_DATA": {
+                                        "value": "@pipeline().parameters.TYPE_DATA",
+                                        "type": "Expression"
+                                    },
+                                    "XCENTER": {
+                                        "value": "@pipeline().parameters.XCENTER",
+                                        "type": "Expression"
+                                    },
+                                    "CYC_SK": {
+                                        "value": "@pipeline().parameters.CYC_SK",
+                                        "type": "Expression"
+                                    },
+                                    "ASQL_SCHEMA": {
+                                        "value": "@pipeline().parameters.ASQL_SCHEMA",
+                                        "type": "Expression"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_adb",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Detect and List Files to Load",
+                            "description": "The notebook:\n- Reads TABLE_LOAD_METADATA, CDA_FILE_LOADS, and MANIFEST from Azure SQL\n- Compares latest timestamps to determine full load (first run) or incremental load (subsequent runs)\n- Lists parquet file paths from ADLS that have not yet been loaded\n- Stages the file list in a global temp view TEMP_FILE_INFO_TABLE for notebook 04 to consume\n- No actual data is read or loaded at this stage — this notebook works purely at the file path level; parquet contents are not touched",
+                            "type": "DatabricksNotebook",
+                            "dependsOn": [
+                                {
+                                    "activity": "Load Manifest Data to Azure SQL",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 0,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "notebookPath": "/insurance_claims_domain/03 Detect and List Files to Load",
+                                "baseParameters": {
+                                    "CLIENT_DATA_PATH": {
+                                        "value": "@pipeline().parameters.CLIENT_DATA_PATH",
+                                        "type": "Expression"
+                                    },
+                                    "XCENTER": {
+                                        "value": "@pipeline().parameters.XCENTER",
+                                        "type": "Expression"
+                                    },
+                                    "CYC_SK": {
+                                        "value": "@pipeline().parameters.CYC_SK",
+                                        "type": "Expression"
+                                    },
+                                    "ASQL_SCHEMA": {
+                                        "value": "@pipeline().parameters.ASQL_SCHEMA",
+                                        "type": "Expression"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_adb",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Populate CDA_FILE_LOADS Table",
+                            "description": "Registers every new parquet file that needs to be loaded into the pipeline.\n\nNotebook 03 found which files exist in ADLS. This notebook takes that list and saves it into CDA_FILE_LOADS in Azure SQL — one row per file — marking each as \"not yet loaded\" (IS_LOADED=0). The Src→Raw notebook will later read this table to know exactly which files to copy into the raw zone.\n\nThe notebook:\n- Reads TABLE_LOAD_METADATA and CDA_FILE_LOADS from Azure SQL into temp views\n- Reads the file list from global_temp.TEMP_FILE_INFO_TABLE staged by notebook 03\n- Joins the three — only keeping files where LOAD_STATUS = 'I' (new data detected) and not already present in CDA_FILE_LOADS\n- Inserts the resulting rows into abc.CDA_FILE_LOADS with IS_LOADED=0, tagged with CYC_RUN_SK",
+                            "type": "DatabricksNotebook",
+                            "dependsOn": [
+                                {
+                                    "activity": "Detect and List Files to Load",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 0,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "notebookPath": "/insurance_claims_domain/04 Populate CDA_FILE_LOADS Table",
+                                "baseParameters": {
+                                    "XCENTER": {
+                                        "value": "@pipeline().parameters.XCENTER",
+                                        "type": "Expression"
+                                    },
+                                    "CYC_SK": {
+                                        "value": "@pipeline().parameters.CYC_SK",
+                                        "type": "Expression"
+                                    },
+                                    "ASQL_SCHEMA": {
+                                        "value": "@pipeline().parameters.ASQL_SCHEMA",
+                                        "type": "Expression"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_adb",
+                                "type": "LinkedServiceReference"
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                "name": "Fetch CYC_CUR_RUN_SK",
+                "description": "Fetches the current cycle run Surrogate Key (CYC_CUR_RUN_SK) for the specified cycle from CYC_CTRL_TBL and passes downstream to child pipelines.",
+                "type": "Lookup",
+                "dependsOn": [
+                    {
+                        "activity": "Check cycle run status",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "source": {
+                        "type": "AzureSqlSource",
+                        "sqlReaderQuery": {
+                            "value": "SELECT CAST(CYC_CUR_RUN_SK AS VARCHAR) AS CYC_CUR_RUN_SK FROM @{pipeline().parameters.ASQL_SCHEMA}.CYC_CTRL_TBL WHERE CYC_SK=@{pipeline().parameters.CYC_SK}",
+                            "type": "Expression"
+                        },
+                        "queryTimeout": "02:00:00",
+                        "partitionOption": "None"
+                    },
+                    "dataset": {
+                        "referenceName": "ds_asql_abc",
+                        "type": "DatasetReference"
+                    }
+                }
+            },
+            {
+                "name": "Manifest Failure Email",
+                "description": "Sends pipeline failure details to Logic App, which then emails the recipient about cycle status check failure before manifest processing.\n\nGlobal parameters work at the factory level, shared across ALL pipelines - not defined per pipeline.\n\nPerfect for failure emails because: Single update point (change LogicAppURL once, updates everywhere), ensures consistent alerting to the same ops team automatically.\n\nFor this project: Same team monitors all pipelines, so one global config = one place to maintain alerting infrastructure.",
+                "type": "WebActivity",
+                "dependsOn": [
+                    {
+                        "activity": "Check cycle run status",
+                        "dependencyConditions": [
+                            "Failed"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "method": "POST",
+                    "url": {
+                        "value": "@pipeline().globalParameters.LogicAppURL",
+                        "type": "Expression"
+                    },
+                    "body": {
+                        "value": "{\n\"message\" : \"Hi Team,\n<p>Step Name:@{pipeline().Pipeline} </p>\n <p>Run ID:@{pipeline().RunId} </p>\n <p> Status: Failed</p>\n <p> Message: Failure in Manifest Flattening process</p>\",\n\"dataFactoryName\" : \"@{pipeline().DataFactory}\", \n\"pipelineName\" : \"@{pipeline().Pipeline}\"\n}",
+                        "type": "Expression"
+                    }
+                }
+            },
+            {
+                "name": "Source To Raw Data Load",
+                "description": "The pipeline called by this activity copies the data (parquet files) from Client owned data store to our ADLS container",
+                "type": "ExecutePipeline",
+                "dependsOn": [
+                    {
+                        "activity": "Fetch CYC_CUR_RUN_SK",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "pipeline": {
+                        "referenceName": "pl_c_source_to_raw",
+                        "type": "PipelineReference"
+                    },
+                    "waitOnCompletion": true,
+                    "parameters": {
+                        "FORCE_IND": {
+                            "value": "@pipeline().parameters.FORCE_IND",
+                            "type": "Expression"
+                        },
+                        "STEP_SK_RAW": {
+                            "value": "@pipeline().parameters.STEP_SK_RAW",
+                            "type": "Expression"
+                        },
+                        "ASQL_SCHEMA": {
+                            "value": "@pipeline().parameters.ASQL_SCHEMA",
+                            "type": "Expression"
+                        },
+                        "STEP_SK_REPLICA": {
+                            "value": "@pipeline().parameters.STEP_SK_REPLICA",
+                            "type": "Expression"
+                        },
+                        "XCENTER": {
+                            "value": "@pipeline().parameters.XCENTER",
+                            "type": "Expression"
+                        },
+                        "CYC_RUN_SK": {
+                            "value": "@activity('Fetch CYC_CUR_RUN_SK').output.firstRow['CYC_CUR_RUN_SK']",
+                            "type": "Expression"
+                        },
+                        "ADLS_CLIENT_DATA_PATH": {
+                            "value": "@pipeline().parameters.CLIENT_DATA_PATH",
+                            "type": "Expression"
+                        },
+                        "ADLS_RAW_PATH": {
+                            "value": "@pipeline().parameters.ADLS_RAW_PATH",
+                            "type": "Expression"
+                        },
+                        "FORCE_TRUNCATE": {
+                            "value": "@pipeline().parameters.FORCE_TRUNCATE",
+                            "type": "Expression"
+                        },
+                        "Processed_DB": {
+                            "value": "@pipeline().parameters.REPLICA_DB",
+                            "type": "Expression"
+                        },
+                        "Processed_Schema": {
+                            "value": "@pipeline().parameters.REPLICA_SCHEMA",
+                            "type": "Expression"
+                        },
+                        "ADLS_REPLICA_PATH": {
+                            "value": "@pipeline().parameters.ADLS_REPLICA_PATH",
+                            "type": "Expression"
+                        },
+                        "TYPE_DATA": {
+                            "value": "@pipeline().parameters.TYPE_DATA",
+                            "type": "Expression"
+                        },
+                        "CYC_SK": {
+                            "value": "@pipeline().parameters.CYC_SK",
+                            "type": "Expression"
+                        }
+                    }
+                }
+            },
+            {
+                "name": "Raw To Replica",
+                "description": "The pipeline called by this activity copies the data (parquet files) from our ADLS container to External Unity Catalog Tables",
+                "type": "ExecutePipeline",
+                "dependsOn": [
+                    {
+                        "activity": "Source To Raw Data Load",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "pipeline": {
+                        "referenceName": "pl_c_raw_to_replica",
+                        "type": "PipelineReference"
+                    },
+                    "waitOnCompletion": true,
+                    "parameters": {
+                        "FORCE_IND": {
+                            "value": "@pipeline().parameters.FORCE_IND",
+                            "type": "Expression"
+                        },
+                        "STEP_SK": {
+                            "value": "@pipeline().parameters.STEP_SK_REPLICA",
+                            "type": "Expression"
+                        },
+                        "ASQL_SCHEMA": {
+                            "value": "@pipeline().parameters.ASQL_SCHEMA",
+                            "type": "Expression"
+                        },
+                        "CYC_SK": {
+                            "value": "@pipeline().parameters.CYC_SK",
+                            "type": "Expression"
+                        },
+                        "XCENTER": {
+                            "value": "@pipeline().parameters.XCENTER",
+                            "type": "Expression"
+                        },
+                        "TYPE_DATA": {
+                            "value": "@pipeline().parameters.TYPE_DATA",
+                            "type": "Expression"
+                        },
+                        "CYC_RUN_SK": {
+                            "value": "@activity('Fetch CYC_CUR_RUN_SK').output.firstRow['CYC_CUR_RUN_SK']",
+                            "type": "Expression"
+                        },
+                        "ADLS_RAW_PATH": {
+                            "value": "@pipeline().parameters.ADLS_RAW_PATH",
+                            "type": "Expression"
+                        },
+                        "ADLS_REPLICA_PATH": {
+                            "value": "@pipeline().parameters.ADLS_REPLICA_PATH",
+                            "type": "Expression"
+                        },
+                        "REPLICA_DB": {
+                            "value": "@pipeline().parameters.REPLICA_DB",
+                            "type": "Expression"
+                        },
+                        "REPLICA_SCHEMA": {
+                            "value": "@pipeline().parameters.REPLICA_SCHEMA",
+                            "type": "Expression"
+                        },
+                        "ADLS_BALANCE_PATH": {
+                            "value": "@pipeline().parameters.ADLS_BALANCE_PATH",
+                            "type": "Expression"
+                        }
+                    }
+                }
+            },
+            {
+                "name": "Replica To Refined",
+                "type": "ExecutePipeline",
+                "dependsOn": [
+                    {
+                        "activity": "Raw To Replica",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "pipeline": {
+                        "referenceName": "pl_c_replica_to_refined",
+                        "type": "PipelineReference"
+                    },
+                    "waitOnCompletion": true,
+                    "parameters": {
+                        "ASQL_SCHEMA": {
+                            "value": "@pipeline().parameters.ASQL_SCHEMA",
+                            "type": "Expression"
+                        },
+                        "FORCE_IND": {
+                            "value": "@pipeline().parameters.FORCE_IND",
+                            "type": "Expression"
+                        },
+                        "STEP_SK": {
+                            "value": "@pipeline().parameters.STEP_SK_REFINED",
+                            "type": "Expression"
+                        },
+                        "XCENTER": {
+                            "value": "@pipeline().parameters.XCENTER",
+                            "type": "Expression"
+                        },
+                        "CYC_SK": {
+                            "value": "@pipeline().parameters.CYC_SK",
+                            "type": "Expression"
+                        },
+                        "CATALOG": {
+                            "value": "@pipeline().parameters.CATALOG",
+                            "type": "Expression"
+                        },
+                        "ADLS_REFINED_PATH": {
+                            "value": "@pipeline().parameters.ADLS_REFINED_PATH",
+                            "type": "Expression"
+                        },
+                        "TYPE_DATA": {
+                            "value": "@pipeline().parameters.TYPE_DATA",
+                            "type": "Expression"
+                        },
+                        "REPLICA_SCHEMA": {
+                            "value": "@pipeline().parameters.REPLICA_SCHEMA",
+                            "type": "Expression"
+                        },
+                        "REFINED_SCHEMA": {
+                            "value": "@pipeline().parameters.REFINED_SCHEMA",
+                            "type": "Expression"
+                        }
+                    }
+                }
+            },
+            {
+                "name": "Cycle End",
+                "type": "SqlServerStoredProcedure",
+                "dependsOn": [
+                    {
+                        "activity": "Replica To Refined",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 2,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "storedProcedureName": {
+                        "value": "@{pipeline().parameters.ASQL_SCHEMA}.[PROC_UPDATE_CYC_END]",
+                        "type": "Expression"
+                    },
+                    "storedProcedureParameters": {
+                        "CYC_SK": {
+                            "value": {
+                                "value": "@pipeline().parameters.CYC_SK",
+                                "type": "Expression"
+                            },
+                            "type": "Int32"
+                        }
+                    }
+                },
+                "linkedServiceName": {
+                    "referenceName": "ls_icd_asql_abc_metadata",
+                    "type": "LinkedServiceReference"
+                }
+            },
+            {
+                "name": "To Truncate Data In archive Tables",
+                "description": "Loops over each backup table name and takes a fresh snapshot — truncates the old backup then copies the current data into it. ",
+                "type": "ForEach",
+                "dependsOn": [
+                    {
+                        "activity": "Cycle End",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "userProperties": [],
+                "typeProperties": {
+                    "items": {
+                        "value": "@pipeline().parameters.ARCHIVE_TABLES",
+                        "type": "Expression"
+                    },
+                    "activities": [
+                        {
+                            "name": "Copy Data To Archive",
+                            "description": "Truncates the target _BACKUP table then bulk-inserts all XCENTER='CC' rows from the source table — one table per iteration.",
+                            "type": "Copy",
+                            "dependsOn": [],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 0,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "source": {
+                                    "type": "AzureSqlSource",
+                                    "sqlReaderQuery": {
+                                        "value": "@concat('SELECT * FROM abc.',item(),' WHERE XCENTER=''CC''')",
+                                        "type": "Expression"
+                                    },
+                                    "queryTimeout": "02:00:00",
+                                    "partitionOption": "None"
+                                },
+                                "sink": {
+                                    "type": "AzureSqlSink",
+                                    "preCopyScript": {
+                                        "value": "Truncate table abc.@{concat(item(),'_BACKUP')}",
+                                        "type": "Expression"
+                                    },
+                                    "writeBehavior": "insert",
+                                    "sqlWriterUseTableLock": false,
+                                    "disableMetricsCollection": false
+                                },
+                                "enableStaging": false,
+                                "translator": {
+                                    "type": "TabularTranslator",
+                                    "typeConversion": true,
+                                    "typeConversionSettings": {
+                                        "allowDataTruncation": true,
+                                        "treatBooleanAsNumber": false
+                                    }
+                                }
+                            },
+                            "inputs": [
+                                {
+                                    "referenceName": "ds_asql_abs_archive",
+                                    "type": "DatasetReference",
+                                    "parameters": {
+                                        "tables": {
+                                            "value": "@item()",
+                                            "type": "Expression"
+                                        }
+                                    }
+                                }
+                            ],
+                            "outputs": [
+                                {
+                                    "referenceName": "ds_asql_abs_archive",
+                                    "type": "DatasetReference",
+                                    "parameters": {
+                                        "tables": "@concat(item(),'_BACKUP')"
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                }
+            },
+            {
+                "name": "Archival of CDA FILE LOADS",
+                "description": "Moves CDA_FILE_LOADS rows older than 30 days (already loaded, IS_LOADED=1) into CDA_FILE_LOADS_ARCHIVE, then deletes them from the source table — keeping CDA_FILE_LOADS lean while preserving history.",
+                "type": "SqlServerStoredProcedure",
+                "dependsOn": [
+                    {
+                        "activity": "To Truncate Data In archive Tables",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "storedProcedureName": "[abc].[ARCHIVE_OLD_CDA_FILE_LOADS]",
+                    "storedProcedureParameters": {
+                        "x_center": {
+                            "value": {
+                                "value": "@pipeline().parameters.XCENTER",
+                                "type": "Expression"
+                            },
+                            "type": "String"
+                        }
+                    }
+                },
+                "linkedServiceName": {
+                    "referenceName": "ls_icd_asql_abc_metadata",
+                    "type": "LinkedServiceReference"
+                }
+            },
+            {
+                "name": "Client Dummy Data Load",
+                "type": "DatabricksNotebook",
+                "dependsOn": [],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "notebookPath": "/insurance_claims_domain/00 Code to simulate s3 data loads (Here we use ADLS)"
+                },
+                "linkedServiceName": {
+                    "referenceName": "ls_icd_adb",
+                    "type": "LinkedServiceReference"
+                }
+            }
+        ],
+        "parameters": {
+            "ASQL_SCHEMA": {
+                "type": "string",
+                "defaultValue": "abc"
+            },
+            "CYC_SK": {
+                "type": "string",
+                "defaultValue": "101"
+            },
+            "STEP_SK_RAW": {
+                "type": "string",
+                "defaultValue": "10110"
+            },
+            "STEP_SK_REPLICA": {
+                "type": "string",
+                "defaultValue": "10120"
+            },
+            "STEP_SK_REFINED": {
+                "type": "string",
+                "defaultValue": "10130"
+            },
+            "FORCE_IND": {
+                "type": "string",
+                "defaultValue": "N"
+            },
+            "CLIENT_DATA_PATH": {
+                "type": "string",
+                "defaultValue": "abfss://insurance-claims-domain@azurepractice68256.dfs.core.windows.net/client_data"
+            },
+            "ADLS_RAW_PATH": {
+                "type": "string",
+                "defaultValue": "abfss://insurance-claims-domain@azurepractice68256.dfs.core.windows.net/raw"
+            },
+            "TYPE_DATA": {
+                "type": "string",
+                "defaultValue": "claims"
+            },
+            "XCENTER": {
+                "type": "string",
+                "defaultValue": "CC"
+            },
+            "FORCE_TRUNCATE": {
+                "type": "string",
+                "defaultValue": "N"
+            },
+            "REPLICA_DB": {
+                "type": "string",
+                "defaultValue": "insurance_claims_domain  "
+            },
+            "REPLICA_SCHEMA": {
+                "type": "string",
+                "defaultValue": "replica"
+            },
+            "ADLS_REPLICA_PATH": {
+                "type": "string",
+                "defaultValue": "abfss://insurance-claims-domain@azurepractice68256.dfs.core.windows.net/replica"
+            },
+            "ADLS_BALANCE_PATH": {
+                "type": "string",
+                "defaultValue": "abfss://insurance-claims-domain@azurepractice68256.dfs.core.windows.net/balance_recon"
+            },
+            "ADLS_REFINED_PATH": {
+                "type": "string",
+                "defaultValue": "abfss://insurance-claims-domain@azurepractice68256.dfs.core.windows.net/refined"
+            },
+            "CATALOG": {
+                "type": "string",
+                "defaultValue": "insurance_claims_domain"
+            },
+            "REFINED_SCHEMA": {
+                "type": "string",
+                "defaultValue": "refined"
+            },
+            "ARCHIVE_TABLES": {
+                "type": "array",
+                "defaultValue": [
+                    "MANIFEST",
+                    "MANIFEST_ARCHIVE",
+                    "TABLE_LOAD_METADATA",
+                    "RAW_TABLE_LOAD",
+                    "CDA_FILE_LOADS",
+                    "TABLES_TO_LOAD_RPL",
+                    "TABLES_TO_LOAD"
+                ]
+            }
+        },
+        "variables": {
+            "VAR_CYC_RUN_SK": {
+                "type": "String"
+            }
+        },
+        "folder": {
+            "name": "insurance_claims_domain"
+        },
+        "annotations": [],
+        "lastPublishTime": "2026-04-07T09:38:02Z"
+    },
+    "type": "Microsoft.DataFactory/factories/pipelines"
+}

@@ -1,0 +1,1323 @@
+{
+    "name": "pl_c_raw_to_replica",
+    "properties": {
+        "description": "This pipeline copies the data (parquet files) from our ADLS container to External Unity Catalog Tables",
+        "activities": [
+            {
+                "name": "Step Start",
+                "description": "Marks the Raw to Replica step as in-progress by inserting a new run record into STEP_RUN_TBL, updating STEP_STS_CD to in-progress in STEP_CTRL_TBL, and returning STEP_RUN_SK and CYC_RUN_SK for use by downstream activities.",
+                "type": "SqlServerStoredProcedure",
+                "dependsOn": [],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 2,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "storedProcedureName": {
+                        "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_UPDATE_STEP_START",
+                        "type": "Expression"
+                    },
+                    "storedProcedureParameters": {
+                        "FORCE_IND": {
+                            "value": {
+                                "value": "@pipeline().parameters.FORCE_IND",
+                                "type": "Expression"
+                            },
+                            "type": "String"
+                        },
+                        "STEP_SK": {
+                            "value": {
+                                "value": "@pipeline().parameters.STEP_SK",
+                                "type": "Expression"
+                            },
+                            "type": "Int32"
+                        }
+                    }
+                },
+                "linkedServiceName": {
+                    "referenceName": "ls_icd_asql_abc_metadata",
+                    "type": "LinkedServiceReference"
+                }
+            },
+            {
+                "name": "Populate Table List for Raw to Replica Load",
+                "description": "Clears and repopulates TABLES_TO_LOAD_RPL with all active tables that have completed the Source to ADLS load, providing the ForEach activity with the list of tables to process in the Raw to Replica step.",
+                "type": "SqlServerStoredProcedure",
+                "dependsOn": [
+                    {
+                        "activity": "Step Start",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 2,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "storedProcedureName": {
+                        "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_WRAPPER_RAW_RPL",
+                        "type": "Expression"
+                    },
+                    "storedProcedureParameters": {
+                        "CYC_SK": {
+                            "value": {
+                                "value": "@pipeline().parameters.CYC_SK",
+                                "type": "Expression"
+                            },
+                            "type": "Int32"
+                        },
+                        "STEP_SK": {
+                            "value": {
+                                "value": "@pipeline().parameters.STEP_SK",
+                                "type": "Expression"
+                            },
+                            "type": "Int32"
+                        },
+                        "XCENTER": {
+                            "value": {
+                                "value": "@pipeline().parameters.XCENTER",
+                                "type": "Expression"
+                            },
+                            "type": "String"
+                        }
+                    }
+                },
+                "linkedServiceName": {
+                    "referenceName": "ls_icd_asql_abc_metadata",
+                    "type": "LinkedServiceReference"
+                }
+            },
+            {
+                "name": "Get Tables for Raw to Replica Load",
+                "description": "Retrieves the list of tables to be processed in the Raw to Replica step from TABLES_TO_LOAD_RPL, providing the ForEach activity with the table name, job details, and cycle run reference for each table.",
+                "type": "Lookup",
+                "dependsOn": [
+                    {
+                        "activity": "Populate Table List for Raw to Replica Load",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 2,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "source": {
+                        "type": "AzureSqlSource",
+                        "sqlReaderQuery": {
+                            "value": "SELECT TGT_FILE_TBL, JOB_SK, STEP_SK, CYC_RUN_SK FROM @{pipeline().parameters.ASQL_SCHEMA}.TABLES_TO_LOAD_RPL WHERE XCENTER='@{pipeline().parameters.XCENTER}' ",
+                            "type": "Expression"
+                        },
+                        "queryTimeout": "02:00:00",
+                        "partitionOption": "None"
+                    },
+                    "dataset": {
+                        "referenceName": "ds_asql_abc",
+                        "type": "DatasetReference"
+                    },
+                    "firstRowOnly": false
+                }
+            },
+            {
+                "name": "Load Data To Replica Tables",
+                "type": "ForEach",
+                "dependsOn": [
+                    {
+                        "activity": "Get Tables for Raw to Replica Load",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "userProperties": [],
+                "typeProperties": {
+                    "items": {
+                        "value": "@activity('Get Tables for Raw to Replica Load').output.value",
+                        "type": "Expression"
+                    },
+                    "batchCount": 40,
+                    "activities": [
+                        {
+                            "name": "Job Start",
+                            "description": "Marks the current table's job as in-progress in JOB_CTRL_TBL and opens a tracking record in JOB_RUN_TBL. Returns JOB_RUN_SK for use by downstream activities.",
+                            "type": "SqlServerStoredProcedure",
+                            "dependsOn": [],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "storedProcedureName": {
+                                    "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_UPDATE_JOB_START",
+                                    "type": "Expression"
+                                },
+                                "storedProcedureParameters": {
+                                    "JOB_SK": {
+                                        "value": {
+                                            "value": "@item().JOB_SK",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int64"
+                                    },
+                                    "STEP_SK": {
+                                        "value": {
+                                            "value": "@item().STEP_SK",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int32"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_asql_abc_metadata",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "ADLS Raw Parquet to Replica External Delta Tables",
+                            "description": "Reads pending parquet files from ADLS raw/, applies CDC logic (MERGE inserts/updates, soft-delete deletes), and loads the results into external Delta tables registered in Unity Catalog under replica schema.",
+                            "type": "DatabricksNotebook",
+                            "dependsOn": [
+                                {
+                                    "activity": "Job Start",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "notebookPath": "/insurance_claims_domain/07 Copy ADLS Raw Parquet to Replica External Delta Tables",
+                                "baseParameters": {
+                                    "TABLE_NAME": {
+                                        "value": "@item().TGT_FILE_TBL",
+                                        "type": "Expression"
+                                    },
+                                    "TYPE_DATA": {
+                                        "value": "@pipeline().parameters.TYPE_DATA",
+                                        "type": "Expression"
+                                    },
+                                    "XCENTER": {
+                                        "value": "@pipeline().parameters.XCENTER",
+                                        "type": "Expression"
+                                    },
+                                    "ASQL_SCHEMA": {
+                                        "value": "@pipeline().parameters.ASQL_SCHEMA",
+                                        "type": "Expression"
+                                    },
+                                    "CYC_SK": {
+                                        "value": "@pipeline().parameters.CYC_SK",
+                                        "type": "Expression"
+                                    },
+                                    "CYC_RUN_SK": {
+                                        "value": "@pipeline().parameters.CYC_RUN_SK",
+                                        "type": "Expression"
+                                    },
+                                    "ADLS_RAW_PATH": {
+                                        "value": "@pipeline().parameters.ADLS_RAW_PATH",
+                                        "type": "Expression"
+                                    },
+                                    "ADLS_REPLICA_PATH": {
+                                        "value": "@pipeline().parameters.ADLS_REPLICA_PATH",
+                                        "type": "Expression"
+                                    },
+                                    "Processed_DB": {
+                                        "value": "@pipeline().parameters.REPLICA_DB",
+                                        "type": "Expression"
+                                    },
+                                    "Processed_Schema": {
+                                        "value": "@pipeline().parameters.REPLICA_SCHEMA",
+                                        "type": "Expression"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_adb",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Job End",
+                            "description": "",
+                            "type": "SqlServerStoredProcedure",
+                            "dependsOn": [
+                                {
+                                    "activity": "ADLS Raw Parquet to Replica External Delta Tables",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "storedProcedureName": {
+                                    "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_UPDATE_JOB_END",
+                                    "type": "Expression"
+                                },
+                                "storedProcedureParameters": {
+                                    "DATA_READ": {
+                                        "value": "0",
+                                        "type": "String"
+                                    },
+                                    "DATA_WRITTEN": {
+                                        "value": "0",
+                                        "type": "String"
+                                    },
+                                    "ERR_MSG": {
+                                        "value": null,
+                                        "type": "String"
+                                    },
+                                    "JOB_SK": {
+                                        "value": {
+                                            "value": "@item().JOB_SK",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int64"
+                                    },
+                                    "RCRD_DEL": {
+                                        "value": {
+                                            "value": "@activity('ADLS Raw Parquet to Replica External Delta Tables').output['runOutput']['ROWS_DELETED']",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int32"
+                                    },
+                                    "RCRD_INS": {
+                                        "value": {
+                                            "value": "@activity('ADLS Raw Parquet to Replica External Delta Tables').output['runOutput']['ROWS_INSERTED']",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int32"
+                                    },
+                                    "RCRD_UPD": {
+                                        "value": {
+                                            "value": "@activity('ADLS Raw Parquet to Replica External Delta Tables').output['runOutput']['ROWS_UPDATED']",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int32"
+                                    },
+                                    "ROWS_LOADED": {
+                                        "value": {
+                                            "value": "@activity('ADLS Raw Parquet to Replica External Delta Tables').output['runOutput']['ROWS_LOADED']",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int64"
+                                    },
+                                    "ROWS_READ": {
+                                        "value": {
+                                            "value": "@activity('ADLS Raw Parquet to Replica External Delta Tables').output['runOutput']['ROWS_READ']",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int64"
+                                    },
+                                    "STATUS": {
+                                        "value": {
+                                            "value": "@activity('ADLS Raw Parquet to Replica External Delta Tables').output['runOutput']['STATUS']",
+                                            "type": "Expression"
+                                        },
+                                        "type": "String"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_asql_abc_metadata",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Job End Fail",
+                            "description": "",
+                            "type": "SqlServerStoredProcedure",
+                            "dependsOn": [
+                                {
+                                    "activity": "ADLS Raw Parquet to Replica External Delta Tables",
+                                    "dependencyConditions": [
+                                        "Failed"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "storedProcedureName": {
+                                    "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_UPDATE_JOB_END",
+                                    "type": "Expression"
+                                },
+                                "storedProcedureParameters": {
+                                    "DATA_READ": {
+                                        "value": null,
+                                        "type": "String"
+                                    },
+                                    "DATA_WRITTEN": {
+                                        "value": null,
+                                        "type": "String"
+                                    },
+                                    "ERR_MSG": {
+                                        "value": {
+                                            "value": "@concat(activity('ADLS Raw Parquet to Replica External Delta Tables').output.runPageUrl, ' | ', activity('ADLS Raw Parquet to Replica External Delta Tables').output.runError)",
+                                            "type": "Expression"
+                                        },
+                                        "type": "String"
+                                    },
+                                    "JOB_SK": {
+                                        "value": "0",
+                                        "type": "Int64"
+                                    },
+                                    "RCRD_DEL": {
+                                        "value": "0",
+                                        "type": "Int32"
+                                    },
+                                    "RCRD_INS": {
+                                        "value": "0",
+                                        "type": "Int32"
+                                    },
+                                    "RCRD_UPD": {
+                                        "value": "0",
+                                        "type": "Int32"
+                                    },
+                                    "ROWS_LOADED": {
+                                        "value": "0",
+                                        "type": "Int64"
+                                    },
+                                    "ROWS_READ": {
+                                        "value": "0",
+                                        "type": "Int64"
+                                    },
+                                    "STATUS": {
+                                        "value": "F",
+                                        "type": "String"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_asql_abc_metadata",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Lookup On Job Status",
+                            "type": "Lookup",
+                            "dependsOn": [
+                                {
+                                    "activity": "Job End",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "source": {
+                                    "type": "AzureSqlSource",
+                                    "sqlReaderQuery": {
+                                        "value": "SELECT JOB_STS_CD FROM @{pipeline().parameters.ASQL_SCHEMA}.JOB_CTRL_TBL where JOB_SK = @{item().JOB_SK}",
+                                        "type": "Expression"
+                                    },
+                                    "queryTimeout": "02:00:00",
+                                    "partitionOption": "None"
+                                },
+                                "dataset": {
+                                    "referenceName": "ds_asql_abc",
+                                    "type": "DatasetReference"
+                                }
+                            }
+                        },
+                        {
+                            "name": "Job Failure Email",
+                            "type": "WebActivity",
+                            "dependsOn": [
+                                {
+                                    "activity": "Job End Fail",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 0,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "method": "POST",
+                                "url": {
+                                    "value": "@pipeline().globalParameters.LogicAppURL",
+                                    "type": "Expression"
+                                },
+                                "body": {
+                                    "value": "{\n\"message\" : \"Hi Team,\n<p>Step Name:@{pipeline().Pipeline} </p>\n <p>Run ID:@{pipeline().RunId} </p>\n <p> Status: Failed</p>\",\n\"dataFactoryName\" : \"@{pipeline().DataFactory}\", \n\"pipelineName\" : \"@{pipeline().Pipeline}\"\n}",
+                                    "type": "Expression"
+                                }
+                            }
+                        },
+                        {
+                            "name": "If JOB_STS_CD Is F",
+                            "type": "IfCondition",
+                            "dependsOn": [
+                                {
+                                    "activity": "Lookup On Job Status",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "userProperties": [],
+                            "typeProperties": {
+                                "expression": {
+                                    "value": "@if(equals(activity('Lookup On Job Status').output.firstRow['JOB_STS_CD'], 'F'), true, false)",
+                                    "type": "Expression"
+                                },
+                                "ifFalseActivities": [
+                                    {
+                                        "name": "Update IS_LOADED",
+                                        "type": "Script",
+                                        "dependsOn": [],
+                                        "policy": {
+                                            "timeout": "0.12:00:00",
+                                            "retry": 2,
+                                            "retryIntervalInSeconds": 30,
+                                            "secureOutput": false,
+                                            "secureInput": false
+                                        },
+                                        "userProperties": [],
+                                        "linkedServiceName": {
+                                            "referenceName": "ls_icd_asql_abc_metadata",
+                                            "type": "LinkedServiceReference"
+                                        },
+                                        "typeProperties": {
+                                            "scripts": [
+                                                {
+                                                    "parameters": [
+                                                        {
+                                                            "name": "xcenter",
+                                                            "type": "String",
+                                                            "value": {
+                                                                "value": "@pipeline().parameters.XCENTER",
+                                                                "type": "Expression"
+                                                            },
+                                                            "direction": "Input"
+                                                        },
+                                                        {
+                                                            "name": "curr_cyc_run_sk",
+                                                            "type": "Int16",
+                                                            "value": {
+                                                                "value": "@pipeline().parameters.CYC_RUN_SK",
+                                                                "type": "Expression"
+                                                            },
+                                                            "direction": "Input"
+                                                        },
+                                                        {
+                                                            "name": "table_name",
+                                                            "type": "String",
+                                                            "value": {
+                                                                "value": "@item().TGT_FILE_TBL",
+                                                                "type": "Expression"
+                                                            },
+                                                            "direction": "Input"
+                                                        }
+                                                    ],
+                                                    "type": "Query",
+                                                    "text": {
+                                                        "value": "UPDATE @{pipeline().parameters.ASQL_SCHEMA}.CDA_FILE_LOADS\n                        SET IS_LOADED = 1,\n                            UPDATE_DATE_TIME = CURRENT_TIMESTAMP,CYC_RUN_SK=@curr_cyc_run_sk\n                        WHERE UPPER(TABLE_NAME) = @table_name AND XCENTER=@xcenter\n                            AND IS_LOADED = 0\n                            AND GW_TIMESTAMP IN (SELECT GW_TIMESTAMP FROM @{pipeline().parameters.ASQL_SCHEMA}.RAW_TABLE_LOAD where table_name = UPPER(@table_name) AND XCENTER=@xcenter);",
+                                                        "type": "Expression"
+                                                    }
+                                                }
+                                            ],
+                                            "scriptBlockExecutionTimeout": "02:00:00"
+                                        }
+                                    }
+                                ],
+                                "ifTrueActivities": [
+                                    {
+                                        "name": "Job Failure Email Based On Job Status",
+                                        "type": "WebActivity",
+                                        "dependsOn": [],
+                                        "policy": {
+                                            "timeout": "0.12:00:00",
+                                            "retry": 2,
+                                            "retryIntervalInSeconds": 30,
+                                            "secureOutput": false,
+                                            "secureInput": false
+                                        },
+                                        "userProperties": [],
+                                        "typeProperties": {
+                                            "method": "POST",
+                                            "url": {
+                                                "value": "@pipeline().globalParameters.LogicAppURL",
+                                                "type": "Expression"
+                                            },
+                                            "body": {
+                                                "value": "{\n\"message\" : \"Hi Team,\n<p>Step Name:@{pipeline().Pipeline} </p>\n <p>Run ID:@{pipeline().RunId} </p>\n <p> Status: Failed</p>\",\n\"dataFactoryName\" : \"@{pipeline().DataFactory}\", \n\"pipelineName\" : \"@{pipeline().Pipeline}\"\n}",
+                                                "type": "Expression"
+                                            }
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                "name": "Replica Table Balancing Part 1",
+                "description": "Here we are confirming that the replica Delta tables received exactly what was in the raw parquet - no rows dropped, no rows duplicated silently.\n\n- Reads raw parquet from ADLS, deduplicate it, and stage the result as global temp views for downstream balance reconciliation.\n- For tables loaded in the current cycle, raw parquet is read from ADLS, deduplicated, and staged as global_temp.{table}_source. For tables not loaded in the current cycle, the prior balance_recon Delta table is used as a fallback to ensure downstream reconciliation can still run.\n- No writes, no metrics, no reconciliation — source prep only.",
+                "type": "DatabricksNotebook",
+                "dependsOn": [
+                    {
+                        "activity": "Get Tables for Raw to Replica Load",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 2,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "notebookPath": "/insurance_claims_domain/08 Replica Table Balancing Part 1",
+                    "baseParameters": {
+                        "CYC_SK": {
+                            "value": "@pipeline().parameters.CYC_SK",
+                            "type": "Expression"
+                        },
+                        "ASQL_SCHEMA": {
+                            "value": "@pipeline().parameters.ASQL_SCHEMA",
+                            "type": "Expression"
+                        },
+                        "XCENTER": {
+                            "value": "@pipeline().parameters.XCENTER",
+                            "type": "Expression"
+                        },
+                        "TYPE_DATA": {
+                            "value": "@pipeline().parameters.TYPE_DATA",
+                            "type": "Expression"
+                        },
+                        "ADLS_RAW_PATH": {
+                            "value": "@pipeline().parameters.ADLS_RAW_PATH",
+                            "type": "Expression"
+                        },
+                        "ADLS_BALANCE_PATH": {
+                            "value": "@pipeline().parameters.ADLS_BALANCE_PATH",
+                            "type": "Expression"
+                        }
+                    }
+                },
+                "linkedServiceName": {
+                    "referenceName": "ls_icd_adb",
+                    "type": "LinkedServiceReference"
+                }
+            },
+            {
+                "name": "Replica Table Balancing Part 2",
+                "description": "Here we are confirming that the replica Delta tables received exactly what was in the raw parquet - no rows dropped, no rows duplicated silently.\n\n- Reads raw parquet from ADLS, deduplicate it, and stage the result as global temp views for downstream balance reconciliation.\n- For tables loaded in the current cycle, raw parquet is read from ADLS, deduplicated, and staged as global_temp.{table}_source. For tables not loaded in the current cycle, the prior balance_recon Delta table is used as a fallback to ensure downstream reconciliation can still run.\n- No writes, no metrics, no reconciliation — source prep only.",
+                "type": "DatabricksNotebook",
+                "dependsOn": [
+                    {
+                        "activity": "Get Tables for Raw to Replica Load",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 2,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "notebookPath": "/insurance_claims_domain/09 Replica Table Balancing Part 2",
+                    "baseParameters": {
+                        "CYC_SK": {
+                            "value": "@pipeline().parameters.CYC_SK",
+                            "type": "Expression"
+                        },
+                        "ASQL_SCHEMA": {
+                            "value": "@pipeline().parameters.ASQL_SCHEMA",
+                            "type": "Expression"
+                        },
+                        "XCENTER": {
+                            "value": "@pipeline().parameters.XCENTER",
+                            "type": "Expression"
+                        },
+                        "TYPE_DATA": {
+                            "value": "@pipeline().parameters.TYPE_DATA",
+                            "type": "Expression"
+                        },
+                        "ADLS_RAW_PATH": {
+                            "value": "@pipeline().parameters.ADLS_RAW_PATH",
+                            "type": "Expression"
+                        },
+                        "ADLS_BALANCE_PATH": {
+                            "value": "@pipeline().parameters.ADLS_BALANCE_PATH",
+                            "type": "Expression"
+                        }
+                    }
+                },
+                "linkedServiceName": {
+                    "referenceName": "ls_icd_adb",
+                    "type": "LinkedServiceReference"
+                }
+            },
+            {
+                "name": "Step End Fail",
+                "type": "SqlServerStoredProcedure",
+                "dependsOn": [
+                    {
+                        "activity": "Load Data To Replica Tables",
+                        "dependencyConditions": [
+                            "Failed"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 2,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "storedProcedureName": {
+                        "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_UPDATE_STEP_END",
+                        "type": "Expression"
+                    },
+                    "storedProcedureParameters": {
+                        "STATUS": {
+                            "value": "F",
+                            "type": "String"
+                        },
+                        "STEP_SK": {
+                            "value": {
+                                "value": "@pipeline().parameters.STEP_SK",
+                                "type": "Expression"
+                            },
+                            "type": "Int32"
+                        }
+                    }
+                },
+                "linkedServiceName": {
+                    "referenceName": "ls_icd_asql_abc_metadata",
+                    "type": "LinkedServiceReference"
+                }
+            },
+            {
+                "name": "Cycle End Fail",
+                "type": "SqlServerStoredProcedure",
+                "dependsOn": [
+                    {
+                        "activity": "Load Data To Replica Tables",
+                        "dependencyConditions": [
+                            "Failed"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 2,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "storedProcedureName": {
+                        "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_UPDATE_CYC_END",
+                        "type": "Expression"
+                    },
+                    "storedProcedureParameters": {
+                        "CYC_SK": {
+                            "value": {
+                                "value": "@pipeline().parameters.CYC_SK",
+                                "type": "Expression"
+                            },
+                            "type": "Int32"
+                        }
+                    }
+                },
+                "linkedServiceName": {
+                    "referenceName": "ls_icd_asql_abc_metadata",
+                    "type": "LinkedServiceReference"
+                }
+            },
+            {
+                "name": "Replica Table Balancing - Final Reconciliation",
+                "description": "- While the ForEach is busy loading replica tables (notebook 07), notebooks 08 and 09 are simultaneously reading and deduplicating raw parquet for their specific assigned tables into global temp views — 08 handles cc_claim and cc_transaction, 09 handles cc_policy, cc_exposure and cc_contact\n- Only these tables are prepped because they are the key financial tables needed to compute the 5 balance metrics — the other tables are loaded by the ForEach but don't need to be reconciled\n- By the time the ForEach finishes, all source views are already prepared\n- Notebook 10 then immediately compares source vs replica — no waiting needed\n- This is why 08 and 09 run in parallel with the ForEach, not after it",
+                "type": "DatabricksNotebook",
+                "dependsOn": [
+                    {
+                        "activity": "Replica Table Balancing Part 1",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    },
+                    {
+                        "activity": "Replica Table Balancing Part 2",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    },
+                    {
+                        "activity": "Load Data To Replica Tables",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "notebookPath": "/insurance_claims_domain/10 Replica Table Balancing - Final Reconciliation",
+                    "baseParameters": {
+                        "CYC_SK": {
+                            "value": "@pipeline().parameters.CYC_SK",
+                            "type": "Expression"
+                        },
+                        "ASQL_SCHEMA": {
+                            "value": "@pipeline().parameters.ASQL_SCHEMA",
+                            "type": "Expression"
+                        },
+                        "XCENTER": {
+                            "value": "@pipeline().parameters.XCENTER",
+                            "type": "Expression"
+                        },
+                        "CATALOG": {
+                            "value": "@pipeline().parameters.REPLICA_DB",
+                            "type": "Expression"
+                        },
+                        "REPLICA_SCHEMA": {
+                            "value": "@pipeline().parameters.REPLICA_SCHEMA",
+                            "type": "Expression"
+                        },
+                        "ADLS_BALANCE_PATH": {
+                            "value": "@pipeline().parameters.ADLS_BALANCE_PATH",
+                            "type": "Expression"
+                        }
+                    }
+                },
+                "linkedServiceName": {
+                    "referenceName": "ls_icd_adb",
+                    "type": "LinkedServiceReference"
+                }
+            },
+            {
+                "name": "If Condition",
+                "type": "IfCondition",
+                "dependsOn": [
+                    {
+                        "activity": "Replica Table Balancing - Final Reconciliation",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "userProperties": [],
+                "typeProperties": {
+                    "expression": {
+                        "value": "@equals(activity('Replica Table Balancing - Final Reconciliation').output.runOutput['Balance_Recon_Status'],'S')",
+                        "type": "Expression"
+                    },
+                    "ifFalseActivities": [
+                        {
+                            "name": "Step End Fail due to Final Recon Failure",
+                            "type": "SqlServerStoredProcedure",
+                            "dependsOn": [],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "storedProcedureName": {
+                                    "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_UPDATE_STEP_END",
+                                    "type": "Expression"
+                                },
+                                "storedProcedureParameters": {
+                                    "STATUS": {
+                                        "value": "F",
+                                        "type": "String"
+                                    },
+                                    "STEP_SK": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.STEP_SK",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int32"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_asql_abc_metadata",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Cycle End Fail due to Final Recon Failure",
+                            "type": "SqlServerStoredProcedure",
+                            "dependsOn": [
+                                {
+                                    "activity": "Step End Fail due to Final Recon Failure",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "storedProcedureName": {
+                                    "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_UPDATE_CYC_END",
+                                    "type": "Expression"
+                                },
+                                "storedProcedureParameters": {
+                                    "CYC_SK": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.CYC_SK",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int32"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_asql_abc_metadata",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Replica Recon Failure",
+                            "type": "WebActivity",
+                            "dependsOn": [
+                                {
+                                    "activity": "Cycle End Fail due to Final Recon Failure",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "method": "POST",
+                                "url": {
+                                    "value": "@pipeline().globalParameters.LogicAppURL",
+                                    "type": "Expression"
+                                },
+                                "body": {
+                                    "message": "Hi,<p>@{pipeline().Pipeline} with Run ID @{pipeline().RunId} has failed due to Source and Replica Balance Recon Mismatch.</p>",
+                                    "dataFactoryName": "@{pipeline().DataFactory}",
+                                    "pipelineName": "@{pipeline().Pipeline}"
+                                }
+                            }
+                        },
+                        {
+                            "name": "Fail Pipeline - Final Recon Failure",
+                            "type": "Fail",
+                            "dependsOn": [
+                                {
+                                    "activity": "Replica Recon Failure",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "userProperties": [],
+                            "typeProperties": {
+                                "message": "Replica Balance Recon Failed ",
+                                "errorCode": "F"
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                "name": "Lookup On Job Status To Determine Step Status",
+                "type": "Lookup",
+                "dependsOn": [
+                    {
+                        "activity": "If Condition",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 2,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "source": {
+                        "type": "AzureSqlSource",
+                        "sqlReaderQuery": {
+                            "value": "SELECT COUNT(JOB_STS_CD) AS CNT FROM @{pipeline().parameters.ASQL_SCHEMA}.JOB_CTRL_TBL WHERE STEP_SK =@{pipeline().parameters.STEP_SK} AND JOB_TYP_CD='RPL' AND JOB_STS_CD='F'",
+                            "type": "Expression"
+                        },
+                        "queryTimeout": "02:00:00",
+                        "partitionOption": "None"
+                    },
+                    "dataset": {
+                        "referenceName": "ds_asql_abc",
+                        "type": "DatasetReference"
+                    }
+                }
+            },
+            {
+                "name": "If If All Jobs Are Successful",
+                "type": "IfCondition",
+                "dependsOn": [
+                    {
+                        "activity": "Lookup On Job Status To Determine Step Status",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "userProperties": [],
+                "typeProperties": {
+                    "expression": {
+                        "value": "@if(equals(activity('Lookup On Job Status To Determine Step Status').output.firstRow['CNT'], 0), true, false)",
+                        "type": "Expression"
+                    },
+                    "ifFalseActivities": [
+                        {
+                            "name": "Step End Failure",
+                            "type": "SqlServerStoredProcedure",
+                            "dependsOn": [],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "storedProcedureName": {
+                                    "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_UPDATE_STEP_END",
+                                    "type": "Expression"
+                                },
+                                "storedProcedureParameters": {
+                                    "STATUS": {
+                                        "value": "F",
+                                        "type": "String"
+                                    },
+                                    "STEP_SK": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.STEP_SK",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int32"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_asql_abc_metadata",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Cycle End Failure",
+                            "type": "SqlServerStoredProcedure",
+                            "dependsOn": [
+                                {
+                                    "activity": "Step End Failure",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "storedProcedureName": {
+                                    "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_UPDATE_CYC_END",
+                                    "type": "Expression"
+                                },
+                                "storedProcedureParameters": {
+                                    "CYC_SK": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.CYC_SK",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int32"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_asql_abc_metadata",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Raw To Replica Step Fail",
+                            "type": "Fail",
+                            "dependsOn": [
+                                {
+                                    "activity": "Cycle End Failure",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "userProperties": [],
+                            "typeProperties": {
+                                "message": "Raw To Replica Step Failed",
+                                "errorCode": "F"
+                            }
+                        }
+                    ],
+                    "ifTrueActivities": [
+                        {
+                            "name": "Step End",
+                            "type": "SqlServerStoredProcedure",
+                            "dependsOn": [],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "storedProcedureName": {
+                                    "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_UPDATE_STEP_END",
+                                    "type": "Expression"
+                                },
+                                "storedProcedureParameters": {
+                                    "STATUS": {
+                                        "value": "S",
+                                        "type": "String"
+                                    },
+                                    "STEP_SK": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.STEP_SK",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int32"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_asql_abc_metadata",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Step Success Email",
+                            "type": "WebActivity",
+                            "dependsOn": [
+                                {
+                                    "activity": "Step End",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "method": "POST",
+                                "url": {
+                                    "value": "@pipeline().globalParameters.LogicAppURL",
+                                    "type": "Expression"
+                                },
+                                "body": {
+                                    "value": "{\n\"message\" : \"Hi Team,\n<p>Step Name:@{pipeline().Pipeline} </p>\n <p>Run ID:@{pipeline().RunId} </p>\n <p> Status: Success</p>\",\n\"dataFactoryName\" : \"@{pipeline().DataFactory}\", \n\"pipelineName\" : \"@{pipeline().Pipeline}\"\n}",
+                                    "type": "Expression"
+                                }
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                "name": "Replica Data Validation",
+                "type": "ExecutePipeline",
+                "dependsOn": [
+                    {
+                        "activity": "If If All Jobs Are Successful",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "policy": {
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "pipeline": {
+                        "referenceName": "pl_gc_relica_data_validation",
+                        "type": "PipelineReference"
+                    },
+                    "waitOnCompletion": true,
+                    "parameters": {
+                        "ASQL_SCHEMA": {
+                            "value": "@pipeline().parameters.ASQL_SCHEMA",
+                            "type": "Expression"
+                        },
+                        "XCENTER": {
+                            "value": "@pipeline().parameters.XCENTER",
+                            "type": "Expression"
+                        },
+                        "CYC_RUN_SK": {
+                            "value": "@pipeline().parameters.CYC_RUN_SK",
+                            "type": "Expression"
+                        },
+                        "STEP_SK": {
+                            "value": "@pipeline().parameters.STEP_SK",
+                            "type": "Expression"
+                        },
+                        "CATALOG": {
+                            "value": "@pipeline().parameters.REPLICA_DB",
+                            "type": "Expression"
+                        },
+                        "SCHEMA": {
+                            "value": "@pipeline().parameters.REPLICA_SCHEMA",
+                            "type": "Expression"
+                        }
+                    }
+                }
+            }
+        ],
+        "parameters": {
+            "FORCE_IND": {
+                "type": "string"
+            },
+            "STEP_SK": {
+                "type": "string"
+            },
+            "ASQL_SCHEMA": {
+                "type": "string"
+            },
+            "CYC_SK": {
+                "type": "string"
+            },
+            "XCENTER": {
+                "type": "string"
+            },
+            "TYPE_DATA": {
+                "type": "string"
+            },
+            "CYC_RUN_SK": {
+                "type": "string"
+            },
+            "ADLS_RAW_PATH": {
+                "type": "string"
+            },
+            "ADLS_REPLICA_PATH": {
+                "type": "string"
+            },
+            "REPLICA_DB": {
+                "type": "string"
+            },
+            "REPLICA_SCHEMA": {
+                "type": "string"
+            },
+            "ADLS_BALANCE_PATH": {
+                "type": "string"
+            }
+        },
+        "folder": {
+            "name": "insurance_claims_domain"
+        },
+        "annotations": [],
+        "lastPublishTime": "2026-04-05T13:27:05Z"
+    },
+    "type": "Microsoft.DataFactory/factories/pipelines"
+}

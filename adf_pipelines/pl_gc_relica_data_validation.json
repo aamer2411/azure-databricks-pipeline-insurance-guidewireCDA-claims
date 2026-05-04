@@ -1,0 +1,500 @@
+{
+    "name": "pl_gc_relica_data_validation",
+    "properties": {
+        "description": "Runs SQL-based data quality checks on replica tables after loading; flags failing rows and logs them — no rules configured yet. ",
+        "activities": [
+            {
+                "name": "Lookup On Validation Control Table",
+                "type": "Lookup",
+                "dependsOn": [],
+                "policy": {
+                    "timeout": "0.12:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": false,
+                    "secureInput": false
+                },
+                "userProperties": [],
+                "typeProperties": {
+                    "source": {
+                        "type": "AzureSqlSource",
+                        "sqlReaderQuery": {
+                            "value": "SELECT CAST(VAL_SK AS VARCHAR) AS VAL_SK,VAL_RULE,PRIMARY_KEY,TABLE_NAME,XCENTER FROM @{pipeline().parameters.ASQL_SCHEMA}.VALIDATION_CTRL_TBL WHERE ACTI_IND='Y' AND STATUS='C' AND XCENTER='@{pipeline().parameters.XCENTER}' ",
+                            "type": "Expression"
+                        },
+                        "queryTimeout": "02:00:00",
+                        "partitionOption": "None"
+                    },
+                    "dataset": {
+                        "referenceName": "ds_asql_abc",
+                        "type": "DatasetReference"
+                    },
+                    "firstRowOnly": false
+                }
+            },
+            {
+                "name": "For Each Validation Rule",
+                "type": "ForEach",
+                "dependsOn": [
+                    {
+                        "activity": "Lookup On Validation Control Table",
+                        "dependencyConditions": [
+                            "Succeeded"
+                        ]
+                    }
+                ],
+                "userProperties": [],
+                "typeProperties": {
+                    "items": {
+                        "value": "@activity('Lookup On Validation Control Table').output.value",
+                        "type": "Expression"
+                    },
+                    "isSequential": true,
+                    "activities": [
+                        {
+                            "name": "Validation Start",
+                            "description": "Starts validation and updates metadata tables such as REPLICA_JOB_SK, VAL_RUN_SK, STATUS in VALIDATION_CTRL_TBL and inserts an entry in VALIDATION_RUN_TBL.",
+                            "type": "SqlServerStoredProcedure",
+                            "dependsOn": [],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "storedProcedureName": {
+                                    "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_VALIDATION_START",
+                                    "type": "Expression"
+                                },
+                                "storedProcedureParameters": {
+                                    "CYC_RUN_SK": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.CYC_RUN_SK",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int64"
+                                    },
+                                    "PRIMARY_KEY": {
+                                        "value": {
+                                            "value": "@item().PRIMARY_KEY",
+                                            "type": "Expression"
+                                        },
+                                        "type": "String"
+                                    },
+                                    "STEP_SK": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.STEP_SK",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int64"
+                                    },
+                                    "TABLE_NAME": {
+                                        "value": {
+                                            "value": "@item().TABLE_NAME",
+                                            "type": "Expression"
+                                        },
+                                        "type": "String"
+                                    },
+                                    "VAL_RULE": {
+                                        "value": {
+                                            "value": "@item().VAL_RULE",
+                                            "type": "Expression"
+                                        },
+                                        "type": "String"
+                                    },
+                                    "VAL_SK": {
+                                        "value": {
+                                            "value": "@item().VAL_SK",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int64"
+                                    },
+                                    "XCENTER": {
+                                        "value": {
+                                            "value": "@pipeline().parameters.XCENTER",
+                                            "type": "Expression"
+                                        },
+                                        "type": "String"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_asql_abc_metadata",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Get VAL_RUN_SK",
+                            "type": "Lookup",
+                            "dependsOn": [
+                                {
+                                    "activity": "Validation Start",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "source": {
+                                    "type": "AzureSqlSource",
+                                    "sqlReaderQuery": {
+                                        "value": "SELECT CAST(VAL_RUN_SK AS VARCHAR) AS VAL_RUN_SK FROM @{pipeline().parameters.ASQL_SCHEMA}.VALIDATION_CTRL_TBL WHERE XCENTER='@{pipeline().parameters.XCENTER}' AND VAL_SK=@{item().VAL_SK}",
+                                        "type": "Expression"
+                                    },
+                                    "queryTimeout": "02:00:00",
+                                    "partitionOption": "None"
+                                },
+                                "dataset": {
+                                    "referenceName": "ds_asql_abc",
+                                    "type": "DatasetReference"
+                                }
+                            }
+                        },
+                        {
+                            "name": "Replica Tables Data Validation",
+                            "description": "The previous 3 recon notebooks (08, 09, 10) are a financial sanity check — \"do the numbers add up?\" They compare aggregate totals (sums, counts) between raw source and replica.\n\nNotebook 11 is a data quality check — \"are individual rows correct?\" It runs a configurable SQL rule from  ALIDATION_CTRL_TBL that identifies specific rows that violate a business rule, then flags those rows directly in the replica table with Validation_Flag='F'.\n\nIt does the following:\n- Runs a configurable business-rule SQL query (from VALIDATION_CTRL_TBL) against a replica table\n- Flags rows that violate the rule with Validation_Flag='F' directly in the replica table\n- Logs the failed record PKs (comma-separated) to VALIDATION_ERROR_LOG\n- Exits with STATUS=S (no violations) or STATUS=F (any violation found) for ADF IfCondition\n\nThe framework is fully built and ready — but in production VALIDATION_CTRL_TBL is currently empty, meaning no rules are configured and validation runs zero iterations. Rules get added to that table when the business identifies specific data quality checks to enforce.",
+                            "type": "DatabricksNotebook",
+                            "dependsOn": [
+                                {
+                                    "activity": "Get VAL_RUN_SK",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 0,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "notebookPath": "/insurance_claims_domain/11 Replica Tables Data Validation",
+                                "baseParameters": {
+                                    "val_sk": {
+                                        "value": "@item().VAL_SK\n",
+                                        "type": "Expression"
+                                    },
+                                    "xcenter": {
+                                        "value": "@item().XCENTER\n",
+                                        "type": "Expression"
+                                    },
+                                    "config_schema": {
+                                        "value": "@pipeline().parameters.ASQL_SCHEMA\n",
+                                        "type": "Expression"
+                                    },
+                                    "val_rule": {
+                                        "value": "@item().VAL_RULE\n",
+                                        "type": "Expression"
+                                    },
+                                    "table_name": {
+                                        "value": "@item().TABLE_NAME\n",
+                                        "type": "Expression"
+                                    },
+                                    "primary_key": {
+                                        "value": "@item().PRIMARY_KEY\n",
+                                        "type": "Expression"
+                                    },
+                                    "catalog_name": {
+                                        "value": "@pipeline().parameters.CATALOG\n",
+                                        "type": "Expression"
+                                    },
+                                    "schema_name": {
+                                        "value": "@pipeline().parameters.SCHEMA\n",
+                                        "type": "Expression"
+                                    },
+                                    "cyc_run_sk": {
+                                        "value": "@pipeline().parameters.CYC_RUN_SK\n",
+                                        "type": "Expression"
+                                    },
+                                    "val_run_sk": {
+                                        "value": "@activity('Get VAL_RUN_SK').output.firstRow['VAL_RUN_SK']\n",
+                                        "type": "Expression"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_adb",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Validation End",
+                            "description": "Ends validation and updates metadata tables such as STATUS, AUD_DT_TM in VALIDATION_CTRL_TBL and STATUS, END_DT_TM, TOTAL_RECORD_COUNT, FAILED_RECORD_COUNT, PASSED_RECORD_COUNT in VALIDATION_RUN_TBL",
+                            "type": "SqlServerStoredProcedure",
+                            "dependsOn": [
+                                {
+                                    "activity": "Replica Tables Data Validation",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "storedProcedureName": {
+                                    "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_VALIDATION_END",
+                                    "type": "Expression"
+                                },
+                                "storedProcedureParameters": {
+                                    "failed_count": {
+                                        "value": {
+                                            "value": "@activity('Replica Tables Data Validation').output['runOutput']['FAILED_RECORD_COUNT']\n",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int32"
+                                    },
+                                    "passed_count": {
+                                        "value": {
+                                            "value": "@activity('Replica Tables Data Validation').output['runOutput']['PASSED_RECORD_COUNT']\n",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int32"
+                                    },
+                                    "status": {
+                                        "value": {
+                                            "value": "@activity('Replica Tables Data Validation').output['runOutput']['STATUS']\n",
+                                            "type": "Expression"
+                                        },
+                                        "type": "String"
+                                    },
+                                    "total_count": {
+                                        "value": {
+                                            "value": "@activity('Replica Tables Data Validation').output['runOutput']['TOTAL_RECORD_COUNT']\n",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int32"
+                                    },
+                                    "val_sk": {
+                                        "value": {
+                                            "value": "@item().VAL_SK\n",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int32"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_asql_abc_metadata",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Validation End Fail",
+                            "description": "Ends validation and updates metadata tables such as STATUS, AUD_DT_TM in VALIDATION_CTRL_TBL and STATUS, END_DT_TM, TOTAL_RECORD_COUNT, FAILED_RECORD_COUNT, PASSED_RECORD_COUNT in VALIDATION_RUN_TBL",
+                            "type": "SqlServerStoredProcedure",
+                            "dependsOn": [
+                                {
+                                    "activity": "Replica Tables Data Validation",
+                                    "dependencyConditions": [
+                                        "Failed"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "storedProcedureName": {
+                                    "value": "@{pipeline().parameters.ASQL_SCHEMA}.PROC_VALIDATION_END",
+                                    "type": "Expression"
+                                },
+                                "storedProcedureParameters": {
+                                    "failed_count": {
+                                        "value": null,
+                                        "type": "Int32"
+                                    },
+                                    "passed_count": {
+                                        "value": null,
+                                        "type": "Int32"
+                                    },
+                                    "status": {
+                                        "value": "F",
+                                        "type": "String"
+                                    },
+                                    "total_count": {
+                                        "value": null,
+                                        "type": "Int32"
+                                    },
+                                    "val_sk": {
+                                        "value": {
+                                            "value": "@item().VAL_SK\n",
+                                            "type": "Expression"
+                                        },
+                                        "type": "Int32"
+                                    }
+                                }
+                            },
+                            "linkedServiceName": {
+                                "referenceName": "ls_icd_asql_abc_metadata",
+                                "type": "LinkedServiceReference"
+                            }
+                        },
+                        {
+                            "name": "Pipeline Failure Email",
+                            "type": "WebActivity",
+                            "dependsOn": [
+                                {
+                                    "activity": "Validation End Fail",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "method": "POST",
+                                "url": {
+                                    "value": "@pipeline().globalParameters.LogicAppURL",
+                                    "type": "Expression"
+                                },
+                                "body": {
+                                    "value": "{\n\"message\" : \"Hi Team,\n<p>Step Name:@{pipeline().Pipeline} </p>\n <p>Run ID:@{pipeline().RunId} </p>\n <p> Status: Failed</p>\",\n\"dataFactoryName\" : \"@{pipeline().DataFactory}\", \n\"pipelineName\" : \"@{pipeline().Pipeline}\"\n}",
+                                    "type": "Expression"
+                                }
+                            }
+                        },
+                        {
+                            "name": "Lookup On Validation Status",
+                            "type": "Lookup",
+                            "dependsOn": [
+                                {
+                                    "activity": "Validation End",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "policy": {
+                                "timeout": "0.12:00:00",
+                                "retry": 2,
+                                "retryIntervalInSeconds": 30,
+                                "secureOutput": false,
+                                "secureInput": false
+                            },
+                            "userProperties": [],
+                            "typeProperties": {
+                                "source": {
+                                    "type": "AzureSqlSource",
+                                    "sqlReaderQuery": {
+                                        "value": "SELECT STATUS FROM @{pipeline().parameters.ASQL_SCHEMA}.VALIDATION_CTRL_TBL where VAL_SK = @{item().VAL_SK}",
+                                        "type": "Expression"
+                                    },
+                                    "queryTimeout": "02:00:00",
+                                    "partitionOption": "None"
+                                },
+                                "dataset": {
+                                    "referenceName": "ds_asql_abc",
+                                    "type": "DatasetReference"
+                                }
+                            }
+                        },
+                        {
+                            "name": "If STATUS Is F",
+                            "type": "IfCondition",
+                            "dependsOn": [
+                                {
+                                    "activity": "Lookup On Validation Status",
+                                    "dependencyConditions": [
+                                        "Succeeded"
+                                    ]
+                                }
+                            ],
+                            "userProperties": [],
+                            "typeProperties": {
+                                "expression": {
+                                    "value": "@if(equals(activity('Lookup On Validation Status').output.firstRow['STATUS'], 'F'), true, false)",
+                                    "type": "Expression"
+                                },
+                                "ifTrueActivities": [
+                                    {
+                                        "name": "Validation Failure Email Based On Job Status",
+                                        "type": "WebActivity",
+                                        "dependsOn": [],
+                                        "policy": {
+                                            "timeout": "0.12:00:00",
+                                            "retry": 2,
+                                            "retryIntervalInSeconds": 30,
+                                            "secureOutput": false,
+                                            "secureInput": false
+                                        },
+                                        "userProperties": [],
+                                        "typeProperties": {
+                                            "method": "POST",
+                                            "url": {
+                                                "value": "@pipeline().globalParameters.LogicAppURL",
+                                                "type": "Expression"
+                                            },
+                                            "body": {
+                                                "value": "{\n\"message\" : \"Hi Team,\n<p>Step Name:@{pipeline().Pipeline}  </p>\n<p>Run ID:@{pipeline().RunId} </p>\n<p>Status:Failed </p> \n<p>validation Rule ID: @{item().VAL_SK}</p>\",\n\"dataFactoryName\" : \"@{pipeline().DataFactory}\", \n\"pipelineName\" : \"@{pipeline().Pipeline}\"\n}",
+                                                "type": "Expression"
+                                            }
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            }
+        ],
+        "parameters": {
+            "ASQL_SCHEMA": {
+                "type": "string"
+            },
+            "XCENTER": {
+                "type": "string"
+            },
+            "CYC_RUN_SK": {
+                "type": "string"
+            },
+            "STEP_SK": {
+                "type": "string"
+            },
+            "CATALOG": {
+                "type": "string"
+            },
+            "SCHEMA": {
+                "type": "string"
+            }
+        },
+        "folder": {
+            "name": "insurance_claims_domain"
+        },
+        "annotations": [],
+        "lastPublishTime": "2026-04-05T13:26:19Z"
+    },
+    "type": "Microsoft.DataFactory/factories/pipelines"
+}
