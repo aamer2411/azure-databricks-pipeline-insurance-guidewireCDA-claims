@@ -14,7 +14,7 @@ S3 (simulated) → Raw → Replica → Refined → Analytics
 
 ## 2. How It Relates to the Real Project
 
-| Aspect | Real Project | This Practice Project |
+| Aspect | Production Environment | This Project |
 |--------|-------------|----------------------|
 | Source data | AWS S3 (Guidewire CDA live feed) | ADLS `client_data/` folder (simulated) |
 | Tables | 813 (cc_*, cctl_*, ccx_*) | 5 (cc_policy, cc_claim, cc_exposure, cc_contact, cc_transaction) |
@@ -61,7 +61,7 @@ The manifest stage is split into 4 notebooks, mirroring the production pipeline 
 | **Independent retry** | If Part 2 fails, ADF can retry just that notebook without re-copying the manifest from S3 |
 | **ADF visibility** | 4 separate activities in ADF means you can pinpoint exactly which part failed in the monitoring view |
 
-### Why this practice project also uses 4
+### Why this project also uses 4
 
 Although we only have 5 tables, we deliberately mirror the 4-notebook structure because:
 - The goal is to learn and replicate the real production pattern, not just get the data moved
@@ -84,7 +84,7 @@ Although we only have 5 tables, we deliberately mirror the 4-notebook structure 
 | Widget | Purpose |
 |--------|---------|
 | `ADLS_RAW_PATH` | Destination root path in ADLS raw zone |
-| `TYPE_DATA` | Subfolder name under raw/ (e.g. `claims`). Production also has `contact_manager` under raw/ so this parameter makes the notebook reusable across both pipelines. In this practice project it will always be `claims` but is kept as a parameter to mirror production. |
+| `TYPE_DATA` | Subfolder name under raw/ (e.g. `claims`). Production also has `contact_manager` under raw/ so this parameter makes the notebook reusable across both pipelines. In this project it will always be `claims` but is kept as a parameter to mirror production. |
 | `CLIENT_DATA_PATH` | Source path -- ADLS client_data/ (our simulated S3) |
 
 **Idempotency:** Safe to rerun any number of times. `dbutils.fs.cp` overwrites the destination file each time — same `manifest.json` is re-copied, no duplicates, no side effects. If ADF retries due to a transient failure, the result is identical.
@@ -403,8 +403,8 @@ Src->Raw      Reads abc.CDA_FILE_LOADS where IS_LOADED=0
 | `CREATE TABLE IF NOT EXISTS` on first run only | `spark.catalog.tableExists()` guards the CREATE — subsequent runs skip it entirely. |
 | `autoMerge = true` | Handles GW CDA schema evolution — new columns in a future fingerprint are automatically merged into the existing Delta table schema. |
 | Soft delete instead of physical delete | GW CDA operation=1 is a before-image (the row as it was before deletion). Keeping it with `Soft_Delete='Y'` preserves history and matches production behaviour. |
-| ROWS_READ from raw parquet, not MANIFEST | Practice project has no `MANIFEST_ARCHIVE` table. Production reads from there; here we count directly from the raw parquet DataFrame. |
-| Storage key via `spark.conf.set()` | Consistent with all other practice notebooks. (RCM project uses `sc._jsc.hadoopConfiguration()` — different environment.) |
+| ROWS_READ from raw parquet, not MANIFEST | This project has no `MANIFEST_ARCHIVE` table. Production reads from there; here we count directly from the raw parquet DataFrame. |
+| Storage key via `spark.conf.set()` | Consistent with all other notebooks. (RCM project uses `sc._jsc.hadoopConfiguration()` — different environment.) |
 
 **Unity Catalog prerequisite (one-time, already done):**
 ```sql
@@ -522,7 +522,7 @@ The string `"cc_claim_schema_v1"` is hashed → always produces the same value (
 To simulate a schema change, change `_schema_v1` to `_schema_v2` — a new fingerprint folder
 will be created and `manifest.json` will gain a second entry in `schemaHistory`.
 
-**Fingerprints for the 5 practice tables (stable, never change unless you change `_schema_v1`):**
+**Fingerprints for the 5 tables (stable, never change unless you change `_schema_v1`):**
 
 | Table | Fingerprint |
 |-------|-------------|
@@ -612,7 +612,7 @@ The notebooks (`07`, `12`) create Delta tables and register them in Unity Catalo
 
 | Requirement | Why a notebook can't handle it |
 |-------------|-------------------------------|
-| Schema creation | `CREATE SCHEMA` requires the calling principal to have `CREATE SCHEMA` privilege on the catalog. Notebooks run as the cluster's service principal — in a practice environment this is not granted by default. More importantly, schemas are **infrastructure**, not pipeline logic — they are set up once and never touched again by the pipeline. |
+| Schema creation | `CREATE SCHEMA` requires the calling principal to have `CREATE SCHEMA` privilege on the catalog. Notebooks run as the cluster's service principal — in this environment, its is not granted by default. More importantly, schemas are **infrastructure**, not pipeline logic — they are set up once and never touched again by the pipeline. |
 | External location | Unity Catalog rejects `CREATE TABLE ... USING DELTA LOCATION 'abfss://...'` if the ADLS path is not covered by a registered external location. The notebook cannot register external locations — that is a Unity Catalog admin operation. |
 | IAM role on storage | The managed identity backing the external location must have `Storage Blob Data Contributor` on the storage account. This is an Azure Portal operation — no SDK call from within a notebook can grant Azure RBAC roles. |
 
@@ -782,7 +782,7 @@ so it can generate realistic UPDATEs and DELETEs against records that already ex
 
 All pipeline orchestration metadata lives in **Azure SQL** — same pattern as the real project.
 
-### Practice Project — Azure SQL Details
+### Project — Azure SQL Details
 
 | Resource | Value |
 |----------|-------|
@@ -828,10 +828,10 @@ Key points:
 - **Seed data** (`CYC_CTRL_TBL`, `STEP_CTRL_TBL`, `JOB_CTRL_TBL`) is inserted once at initial setup — these are static control rows, not runtime data
 - **Run tables** (`CYC_RUN_TBL`, `STEP_RUN_TBL`, `JOB_RUN_TBL`) grow automatically at runtime via stored procs — never seeded manually
 
-In the practice project the same scripts are run **manually once** in the Azure Portal
+In this project the same scripts are run **manually once** in the Azure Portal
 Query Editor — the equivalent of what DevOps does automatically in production.
 
-### Practice Project — SQL File Location
+### Project — SQL File Location
 
 The `abc` schema scripts are split into two files under:
 ```
@@ -1246,7 +1246,7 @@ Production defines 4 SQL SEQUENCE objects in the `abc` schema:
 | `SEQ_JOB_RUN_SK` | `JOB_RUN_TBL` | `JOB_RUN_SK` |
 | `SEQ_VAL_RUN_SK` | `VALIDATION_RUN_TBL` | `VAL_RUN_SK` |
 
-**Practice project uses IDENTITY instead:**
+**This project uses IDENTITY instead:**
 ```sql
 CYC_RUN_SK INT IDENTITY(1,1)  -- SQL handles it automatically on INSERT
 ```
@@ -1267,7 +1267,7 @@ DECLARE @new_sk INT = NEXT VALUE FOR abc.SEQ_CYC_RUN_SK;
 
 With IDENTITY you only get the SK *after* the INSERT via `SCOPE_IDENTITY()`. For a pipeline that needs to pass `CYC_RUN_SK` downstream to many activities before everything is committed, SEQUENCE gives more control. Additional benefits: can be reseeded without truncating the table, easier to manage in DevOps migrations as an explicit versioned object.
 
-**Impact on practice project:** None — our stored procs insert first then return the SK via `SCOPE_IDENTITY()`, and ADF picks it up from the Lookup output. Functionally identical for our pipeline.
+**Impact on this project:** None — our stored procs insert first then return the SK via `SCOPE_IDENTITY()`, and ADF picks it up from the Lookup output. Functionally identical for our pipeline.
 
 ---
 
@@ -1279,7 +1279,7 @@ With IDENTITY you only get the SK *after* the INSERT via `SCOPE_IDENTITY()`. For
 |--------|--------|-------|
 | `CYC_CTRL_TBL` | ✓ Done | 10 seed rows |
 | `CYC_RUN_TBL` | ✓ Done | Run history — grows every cycle |
-| `STEP_CTRL_TBL` | ✓ Done | 15 seed rows; practice uses 10110/10120/10130 |
+| `STEP_CTRL_TBL` | ✓ Done | 15 seed rows; this project uses 10110/10120/10130 |
 | `STEP_RUN_TBL` | ✓ Done | Run history — grows every step execution |
 | `JOB_CTRL_TBL` | ✓ Done | 14 seed rows (5×RAW + 5×RPL + 2×RFN + 2×CM dummy) |
 | `JOB_RUN_TBL` | ✓ Done | Run history with row counts + error message |
@@ -1555,7 +1555,7 @@ A table that had no new files this cycle gets `CUR_CYC_VALID = 'N'` and is simpl
 | `STEP_SK_PRC` | String | `10120` |
 | `XCENTER` | String | `CC` |
 
-**Note:** In the practice project `JOB_CTRL_TBL` is pre-seeded with all 5 tables, so the INSERT path does not fire on normal runs. It is included to mirror production behaviour and handle fresh-DB or new-table scenarios.
+**Note:** In this project `JOB_CTRL_TBL` is pre-seeded with all 5 tables, so the INSERT path does not fire on normal runs. It is included to mirror production behaviour and handle fresh-DB or new-table scenarios.
 
 **Code:**
 ```sql
