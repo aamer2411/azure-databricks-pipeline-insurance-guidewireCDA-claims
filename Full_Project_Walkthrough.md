@@ -1,11 +1,10 @@
-# Claims Practice Project Guide
-## A Scaled-Down Learning Version of the Slide Insurance GW CDA Claims Pipeline
+# Project Guide
 
 ---
 
 ## 1. Purpose
 
-This project is a **hands-on learning environment** that mirrors the real Slide Insurance
+This project is a **hands-on learning environment** that mirrors the real Production Environment
 Guidewire CDA Claims pipeline but at a much smaller scale — 5 tables instead of 813, simulated S3 data instead of real Guidewire CDA AWS S3 data.
 
 The goal is to understand and build every layer of the pipeline end-to-end:
