@@ -308,7 +308,7 @@ Each notebook accepts Databricks widget parameters. Set the widget values in the
 | Tables | 813 (cc_*, cctl_*, ccx_*) | 5 (cc_policy, cc_claim, cc_exposure, cc_contact, cc_transaction) |
 | Refined tables | 35 | 2 (claim_detail, claim_financial) |
 | Analytics objects | 52 (15 tables + 37 views) | Subset of views |
-| ADF pipelines | 99 | 5 (core pipeline stages) |
+| ADF pipelines | 5 | 5 (core pipeline stages) |
 | Parallel jobs | 805 (Src-to-Raw), 35 (Replica-to-Refined) | Sequential (5 tables) |
 | Secrets | Azure Key Vault | Placeholder values (practice only) |
 | Schedule | Hourly, 7AM-midnight ET, 7 days/week | Manual trigger |
