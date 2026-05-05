@@ -319,7 +319,7 @@ Each notebook accepts Databricks widget parameters. Set the widget values in the
 
 ## Production vs Mini Project Comparison
 
-| Aspect | Production (Slide Insurance) | This Project |
+| Aspect | Production | This Project |
 |--------|------------------------------|-------------|
 | Source data | AWS S3 (live Guidewire CDA feed) | ADLS `client_data/` (simulated by notebook 00) |
 | Tables | 813 (cc_*, cctl_*, ccx_*) | 5 (cc_policy, cc_claim, cc_exposure, cc_contact, cc_transaction) |
