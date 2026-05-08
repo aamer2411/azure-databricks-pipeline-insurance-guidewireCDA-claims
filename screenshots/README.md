@@ -76,15 +76,11 @@ Unity Catalog browser showing the `insurance_claims_domain` catalog with `replic
 
 ## ADLS - Storage Structure (1)
 
-Azure Data Lake Storage Gen2 container view showing the `insurance-claims-domain` container and its top-level zones: `client_data/` (simulated S3 landing), `raw/`, `replica/`, and `refined/`.
-
 ![ADLS Storage Structure 1](adls_1.png)
 
 ---
 
 ## ADLS - Storage Structure (2)
-
-ADLS folder drill-down showing table-level subfolders within a storage zone, illustrating the `{table}/{fingerprint}/{timestamp}/` hierarchy used by the pipeline.
 
 ![ADLS Storage Structure 2](adls_2.png)
 
@@ -92,15 +88,11 @@ ADLS folder drill-down showing table-level subfolders within a storage zone, ill
 
 ## ADLS - Storage Structure (3)
 
-ADLS storage view showing parquet files and Delta table folders (`_delta_log/` + `.parquet`) within a specific table path, demonstrating the append-only raw zone versus the Delta-managed replica zone.
-
 ![ADLS Storage Structure 3](adls_3.png)
 
 ---
 
 ## ADLS - Storage Structure (4)
-
-ADLS storage view showing the refined layer Delta table structure or an additional drill-down of the storage hierarchy.
 
 ![ADLS Storage Structure 4](adls_4.png)
 
