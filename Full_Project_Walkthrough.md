@@ -604,7 +604,7 @@ The production environment and this mini-project use **different catalog and sch
 | Catalog | `dbw_claims_prod_eastus_001` | `insurance_claims_domain` |
 | Replica schema | `cda_replica_claims` | `replica` |
 | Refined schema | `cda_refined_claims` | `refined` |
-| Analytics schema | `slide_analytics` | `analytics` |
+| Analytics schema | `analytics` | `analytics` |
 
 The code patterns, MERGE logic, SCD2 columns, and metadata framework are identical. Only the names change.
 
